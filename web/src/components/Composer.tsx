@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { Icon } from './Icon'
 
 interface Props {
   busy: boolean
+  placeholder: string
   onSend: (text: string) => void
+  autoFocus?: boolean
 }
 
-export function Composer({ busy, onSend }: Props) {
+export function Composer({ busy, placeholder, onSend, autoFocus }: Props) {
   const [text, setText] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -31,28 +32,25 @@ export function Composer({ busy, onSend }: Props) {
   }
 
   return (
-    <div className="composer-wrap">
-      <div className="composer">
-        <textarea
-          ref={ref}
-          rows={1}
-          value={text}
-          placeholder="Задайте вопрос по договорам, регламентам или законам"
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          autoFocus
-        />
-        <button
-          className="send-btn"
-          onClick={submit}
-          disabled={!text.trim() || busy}
-          aria-label="Отправить"
-          title={busy ? 'Дождитесь ответа' : 'Отправить (Enter)'}
-        >
-          <Icon name="send" />
-        </button>
-      </div>
-      <p className="composer-hint">Enter — отправить, Shift + Enter — новая строка</p>
+    <div className="composer">
+      <textarea
+        ref={ref}
+        rows={1}
+        value={text}
+        placeholder={placeholder}
+        aria-label="Вопрос"
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={onKeyDown}
+        autoFocus={autoFocus}
+      />
+      <button
+        className="ask-btn"
+        onClick={submit}
+        disabled={!text.trim() || busy}
+        title={busy ? 'Дождитесь ответа' : 'Enter — спросить, Shift + Enter — новая строка'}
+      >
+        Спросить
+      </button>
     </div>
   )
 }

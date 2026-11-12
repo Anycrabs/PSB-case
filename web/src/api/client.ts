@@ -1,4 +1,4 @@
-import type { ChatResponse, DialogMessage, DialogSummary, LegalDocument } from './types'
+import type { ChatResponse, DialogMessage, DialogSummary, DocumentSummary, LegalDocument } from './types'
 
 const BASE = '/api/v1'
 
@@ -46,6 +46,14 @@ export function listDialogs(): Promise<DialogSummary[]> {
 
 export function getDialog(dialogId: string): Promise<{ dialog_id: string; messages: DialogMessage[] }> {
   return request(`/dialogs/${encodeURIComponent(dialogId)}`)
+}
+
+export function listDocuments(): Promise<DocumentSummary[]> {
+  return request('/documents')
+}
+
+export function sendFeedback(requestId: string, rating: 'up' | 'down'): Promise<{ ok: boolean }> {
+  return request('/feedback', { method: 'POST', body: JSON.stringify({ request_id: requestId, rating }) })
 }
 
 const documentCache = new Map<string, Promise<LegalDocument>>()

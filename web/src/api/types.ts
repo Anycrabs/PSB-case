@@ -55,3 +55,10 @@ export interface LegalDocument {
   text: string
   chunks: DocumentChunkRef[]
 }
+
+export interface DocumentSummary {
+  doc_id: string
+  title: string
+  doc_type: string
+  chunks: number
+}
