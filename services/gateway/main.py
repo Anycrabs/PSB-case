@@ -1,13 +1,13 @@
 """Шлюз: единая точка входа /api/v1, хранение диалогов, простая страница чата. Порт 8000.
 
-Диалоги пока хранятся в памяти процесса — перенос в PostgreSQL отмечен в README как следующий шаг.
+Диалоги, сообщения, ссылки и оценки хранятся в PostgreSQL (DATABASE_URL), без него — в памяти: storage.py.
 Каждый запрос получает request_id (заголовок X-Request-ID): он передаётся в orchestrator, пишется в логи
 всех сервисов и возвращается клиенту, а по нему можно получить трассировку: GET /api/v1/trace/{request_id}.
 """
 
 import time
 import uuid
-from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -17,16 +17,20 @@ from fastapi.responses import FileResponse, StreamingResponse
 from legal_core.config import get_settings
 from legal_core.schemas import ChatRequest, ChatResponse
 from legal_core.sse import REQUEST_ID_HEADER, SSE_HEADERS, get_logger, new_request_id, parse_sse, sse_event
+from services.gateway import storage
 
 SETTINGS = get_settings()
 STATIC = Path(__file__).parent / "static"
 LOG = get_logger("gateway")
-DIALOGS = {}  # dialog_id -> {"messages": [...]}
-FEEDBACK = []
-TRACES = OrderedDict()  # request_id -> трассировка последних ответов
-MAX_TRACES = 500
 
-app = FastAPI(title="Юридический ассистент — gateway", version="0.2.0")
+
+@asynccontextmanager
+async def lifespan(_app):
+    LOG.info("storage=%s", storage.init_storage())
+    yield
+
+
+app = FastAPI(title="Юридический ассистент — gateway", version="0.3.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -54,23 +58,8 @@ def call(method, url, request_id=None, **kwargs):
 
 def open_dialog(request: ChatRequest):
     dialog_id = request.dialog_id or uuid.uuid4().hex[:10]
-    dialog = DIALOGS.setdefault(dialog_id, {"messages": []})
-    history = [m.model_dump() for m in request.history] or [
-        {"role": m["role"], "content": m["content"]} for m in dialog["messages"]
-    ]
-    return dialog_id, dialog, history
-
-
-def remember(dialog_id, dialog, question, result):
-    dialog["messages"].append({"role": "user", "content": question})
-    dialog["messages"].append({"role": "assistant", "content": result["answer_text"], "response": result})
-    TRACES[result["request_id"]] = {
-        "request_id": result["request_id"], "dialog_id": dialog_id, "question": question,
-        "status": result["status"], "latency_ms": result.get("latency_ms", 0),
-        "verification": result.get("verification", {}), "trace": result.get("trace", {}),
-    }
-    while len(TRACES) > MAX_TRACES:
-        TRACES.popitem(last=False)
+    history = [m.model_dump() for m in request.history] or storage.get_history(dialog_id)
+    return dialog_id, history
 
 
 @app.get("/health")
@@ -81,19 +70,19 @@ def health():
 @app.get("/ready")
 def ready():
     try:
-        return call("GET", f"{SETTINGS['orchestrator_url']}/ready")
+        return {**call("GET", f"{SETTINGS['orchestrator_url']}/ready"), "storage": storage.backend()}
     except HTTPException:
-        return {"ready": False}
+        return {"ready": False, "storage": storage.backend()}
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, http_request: Request):
     request_id = http_request.state.request_id
-    dialog_id, dialog, history = open_dialog(request)
+    dialog_id, history = open_dialog(request)
     result = call("POST", f"{SETTINGS['orchestrator_url']}/answer", request_id,
                   json={"question": request.question, "history": history})
     result = {**result, "dialog_id": dialog_id}
-    remember(dialog_id, dialog, request.question, result)
+    storage.save_turn(dialog_id, request.question, result)
     return result
 
 
@@ -101,7 +90,7 @@ def chat(request: ChatRequest, http_request: Request):
 def chat_stream(request: ChatRequest, http_request: Request):
     """Поток SSE: meta → stage… → result (или error). Формат событий — в legal_core/sse.py."""
     request_id = http_request.state.request_id
-    dialog_id, dialog, history = open_dialog(request)
+    dialog_id, history = open_dialog(request)
 
     def stream():
         yield sse_event("meta", {"request_id": request_id, "dialog_id": dialog_id})
@@ -114,7 +103,7 @@ def chat_stream(request: ChatRequest, http_request: Request):
                 for event, data in parse_sse(upstream.iter_lines()):
                     if event == "result":
                         data = {**data, "dialog_id": dialog_id}
-                        remember(dialog_id, dialog, request.question, data)
+                        storage.save_turn(dialog_id, request.question, data)
                     yield sse_event(event, data)
         except httpx.HTTPError as exc:
             LOG.warning("request_id=%s stream failed: %s", request_id, exc)
@@ -127,22 +116,23 @@ def chat_stream(request: ChatRequest, http_request: Request):
 @app.get("/api/v1/trace/{request_id}")
 def trace(request_id: str):
     """Как был получен ответ: запросы к поиску, найденные фрагменты, время этапов, замечания проверки."""
-    if request_id not in TRACES:
-        raise HTTPException(404, "Трассировка не найдена: шлюз хранит последние 500 ответов до перезапуска")
-    return TRACES[request_id]
+    found = storage.get_trace(request_id)
+    if not found:
+        raise HTTPException(404, "Трассировка не найдена")
+    return found
 
 
 @app.get("/api/v1/dialogs")
 def dialogs():
-    return [{"dialog_id": d, "title": v["messages"][0]["content"][:80] if v["messages"] else "", "messages": len(v["messages"])}
-            for d, v in DIALOGS.items()]
+    return storage.list_dialogs()
 
 
 @app.get("/api/v1/dialogs/{dialog_id}")
 def dialog(dialog_id: str):
-    if dialog_id not in DIALOGS:
+    found = storage.get_dialog(dialog_id)
+    if found is None:
         raise HTTPException(404, "Диалог не найден")
-    return {"dialog_id": dialog_id, **DIALOGS[dialog_id]}
+    return {"dialog_id": dialog_id, **found}
 
 
 @app.get("/api/v1/documents")
@@ -162,7 +152,7 @@ def chunk(chunk_id: str, http_request: Request):
 
 @app.post("/api/v1/feedback")
 def feedback(payload: dict):
-    FEEDBACK.append(payload)
+    storage.save_feedback(payload)
     return {"ok": True}
 
 
