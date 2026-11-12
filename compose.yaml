@@ -1,6 +1,6 @@
 name: legal-assistant
 
-# Запуск всего стенда: docker compose up --build  ->  http://localhost:8000
+# Запуск всего стенда: docker compose up --build  ->  интерфейс http://localhost:3000, API http://localhost:8000/docs
 # База знаний: data/knowledge-base.zip (путь меняется переменной KB_PATH).
 # Без ключа LLM: docker compose --profile dev up --build и LLM_BASE_URL=http://fake-llm:9000/v1 в .env
 
@@ -89,6 +89,17 @@ services:
     ports: ["8000:8000"]
     depends_on:
       orchestrator: {condition: service_healthy}
+
+  # Веб-интерфейс: React-сборка в nginx, /api проксируется на gateway
+  web:
+    build: {context: ./web}
+    environment:
+      API_UPSTREAM: http://gateway:8000
+    ports: ["3000:80"]
+    networks: [legal-net]
+    restart: unless-stopped
+    depends_on:
+      gateway: {condition: service_healthy}
 
   # Заглушка LLM для разработки без ключа: docker compose --profile dev up
   fake-llm:
