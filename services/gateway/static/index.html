@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Юридический ассистент — тестовый интерфейс</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d1d1f; background: #f6f6f4; }
+  header { padding: 12px 20px; border-bottom: 1px solid #ddd; background: #fff; font-weight: 600; }
+  header small { font-weight: 400; color: #777; margin-left: 8px; }
+  main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); height: calc(100vh - 49px); }
+  #chat { display: flex; flex-direction: column; border-right: 1px solid #ddd; min-height: 0; }
+  #log { flex: 1; overflow-y: auto; padding: 20px; }
+  .msg { max-width: 760px; margin: 0 0 16px; padding: 12px 14px; border-radius: 10px; white-space: pre-wrap; }
+  .user { background: #e8eef9; margin-left: auto; }
+  .bot { background: #fff; border: 1px solid #e2e2e2; }
+  .status { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; margin-bottom: 6px; background: #eee; }
+  .status.answer { background: #dcefdc; } .status.partial { background: #f6ecc8; }
+  .status.refusal { background: #f3d9d6; } .status.clarification { background: #dde6f6; }
+  .meta { color: #888; font-size: 12px; margin-top: 6px; }
+  form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid #ddd; background: #fff; }
+  textarea { flex: 1; resize: none; height: 64px; padding: 10px; font: inherit; border: 1px solid #ccc; border-radius: 8px; }
+  button { padding: 0 18px; border: 0; border-radius: 8px; background: #1d1d1f; color: #fff; font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; }
+  #side { overflow-y: auto; padding: 20px; background: #fff; }
+  #side h3 { margin: 0 0 10px; font-size: 14px; color: #555; }
+  .src { border: 1px solid #e2e2e2; border-radius: 8px; padding: 10px; margin-bottom: 10px; cursor: pointer; }
+  .src:hover { border-color: #999; }
+  .src b { display: block; }
+  .src .q { color: #555; font-size: 13px; margin-top: 4px; }
+  #doc { white-space: pre-wrap; font-size: 13px; border-top: 1px solid #ddd; margin-top: 16px; padding-top: 12px; }
+  mark { background: #fff1a8; }
+</style>
+</head>
+<body>
+<header>Юридический ассистент<small>тестовый интерфейс бэкенда — основной фронтенд в web/</small></header>
+<main>
+  <section id="chat">
+    <div id="log"></div>
+    <form id="form">
+      <textarea id="q" placeholder="Вопрос по документам базы знаний…"></textarea>
+      <button id="send">Спросить</button>
+    </form>
+  </section>
+  <aside id="side"><h3>Источники ответа</h3><div id="sources">Пока нет</div><div id="doc"></div></aside>
+</main>
+<script>
+let dialogId = null;
+const log = document.getElementById("log");
+const esc = s => s.replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+const labels = {answer: "ответ", partial: "частичный ответ", refusal: "отказ", clarification: "уточнение"};
+
+function add(cls, html) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls; div.innerHTML = html; log.appendChild(div);
+  log.scrollTop = log.scrollHeight; return div;
+}
+
+function showSources(sources) {
+  const box = document.getElementById("sources");
+  document.getElementById("doc").textContent = "";
+  if (!sources.length) { box.textContent = "Ответ без ссылок на документы"; return; }
+  box.innerHTML = "";
+  for (const s of sources) {
+    const div = document.createElement("div");
+    div.className = "src";
+    div.innerHTML = `<b>${esc(s.doc_title)}</b>${esc(s.citation)}<div class="q">${esc(s.quote)}</div>`;
+    div.onclick = () => openDoc(s);
+    box.appendChild(div);
+  }
+}
+
+async function openDoc(s) {
+  const r = await fetch(`/api/v1/documents/${encodeURIComponent(s.doc_id)}`);
+  const d = await r.json();
+  const [a, b] = s.char_span;
+  const el = document.getElementById("doc");
+  el.innerHTML = `<b>${esc(d.title)}</b>\n\n` + esc(d.text.slice(0, a)) + "<mark id='hl'>" +
+                 esc(d.text.slice(a, b)) + "</mark>" + esc(d.text.slice(b));
+  document.getElementById("hl").scrollIntoView({block: "center"});
+}
+
+document.getElementById("form").onsubmit = async e => {
+  e.preventDefault();
+  const q = document.getElementById("q"); const text = q.value.trim(); if (!text) return;
+  const btn = document.getElementById("send"); btn.disabled = true; q.value = "";
+  add("user", esc(text));
+  const wait = add("bot", "Ищу в базе знаний…");
+  try {
+    const r = await fetch("/api/v1/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+                                          body: JSON.stringify({question: text, dialog_id: dialogId})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    dialogId = d.dialog_id;
+    wait.innerHTML = `<span class="status ${d.status}">${labels[d.status] || d.status}</span>\n${esc(d.answer_text)}` +
+                     `<div class="meta">${d.latency_ms} мс · проверка: ${d.verification.passed ? "пройдена" : "исправлены ошибки"}</div>`;
+    showSources(d.sources);
+  } catch (err) { wait.textContent = "Ошибка: " + err.message; }
+  btn.disabled = false;
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+name: legal-assistant
+
+# Запуск всего стенда: docker compose up --build  ->  http://localhost:8000
+# База знаний: data/knowledge-base.zip (путь меняется переменной KB_PATH).
+# Без ключа LLM: docker compose --profile dev up --build и LLM_BASE_URL=http://fake-llm:9000/v1 в .env
+
+x-python: &python
+  env_file: .env
+  restart: unless-stopped
+  networks: [legal-net]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ[\"PORT\"]}/health')"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+x-embeddings-build: &embeddings-build
+  context: .
+  dockerfile: docker/python.Dockerfile
+  args: {WITH_EMBEDDINGS: "1", SERVICE: embedder}
+
+services:
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_TAG:-latest}   # после первого запуска зафиксируйте версию
+    volumes: [qdrant-data:/qdrant/storage]
+    networks: [legal-net]
+    restart: unless-stopped
+
+  # Одноразовая сборка индекса: пропускается, если документы не менялись
+  indexer:
+    build: *embeddings-build
+    env_file: .env
+    user: "0"
+    environment:
+      DATA_DIR: /data
+      INDEX_DIR: /index
+    command: ["sh", "-c", "python scripts/build_index.py --data /data/${KB_PATH:-knowledge-base.zip} --out /index --skip-existing"]
+    volumes:
+      - ./data:/data:ro
+      - ./index:/index
+      - hf-cache:/models
+    networks: [legal-net]
+    restart: "no"
+
+  embedder:
+    <<: *python
+    build: *embeddings-build
+    environment: {PORT: "8003"}
+    volumes: [hf-cache:/models]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  retrieval:
+    <<: *python
+    build: {context: ., dockerfile: docker/python.Dockerfile, args: {SERVICE: retrieval}}
+    environment:
+      PORT: "8002"
+      INDEX_DIR: /index
+      RETRIEVAL_BACKEND: qdrant
+      QDRANT_URL: http://qdrant:6333
+      EMBEDDER_URL: http://embedder:8003
+    volumes: ["./index:/index:ro"]
+    depends_on:
+      indexer: {condition: service_completed_successfully}
+      qdrant: {condition: service_started}
+      embedder: {condition: service_healthy}
+
+  orchestrator:
+    <<: *python
+    build: {context: ., dockerfile: docker/python.Dockerfile, args: {SERVICE: orchestrator}}
+    environment:
+      PORT: "8001"
+      RETRIEVAL_URL: http://retrieval:8002
+    depends_on:
+      retrieval: {condition: service_healthy}
+
+  gateway:
+    <<: *python
+    build: {context: ., dockerfile: docker/python.Dockerfile, args: {SERVICE: gateway}}
+    environment:
+      PORT: "8000"
+      ORCHESTRATOR_URL: http://orchestrator:8001
+      RETRIEVAL_URL: http://retrieval:8002
+    ports: ["8000:8000"]
+    depends_on:
+      orchestrator: {condition: service_healthy}
+
+  # Заглушка LLM для разработки без ключа: docker compose --profile dev up
+  fake-llm:
+    <<: *python
+    profiles: [dev]
+    build: {context: ., dockerfile: docker/python.Dockerfile, args: {SERVICE: gateway}}
+    environment: {PORT: "9000"}
+    command: ["uvicorn", "devtools.fake_llm:app", "--host", "0.0.0.0", "--port", "9000"]
+
+networks:
+  legal-net: {}
+
+volumes:
+  qdrant-data: {}
+  hf-cache: {}

@@ -1,0 +1,4 @@
+# Локальные эмбеддинги BAAI/bge-m3 (сервис embedder и сборка индекса).
+# torch ставится отдельно: CPU-сборка — pip install torch --index-url https://download.pytorch.org/whl/cpu
+# После первой успешной установки зафиксируйте точную версию: pip freeze | grep -i flagembedding
+FlagEmbedding>=1.3

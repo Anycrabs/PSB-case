@@ -1,0 +1,10 @@
+# Зависимости прототипа. Версии совпадают с разрешённым списком организаторов
+# (data/demo/platform_allowed_requirements.txt); qdrant-client нужен только прототипу, в сабмите его нет.
+fastapi==0.143.2
+uvicorn==0.54.0
+pydantic==2.14.2
+httpx==0.28.1
+numpy==2.2.6
+pypdf==6.21.4
+beautifulsoup4==4.14.2
+qdrant-client==1.20.0
