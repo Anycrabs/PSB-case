@@ -1,26 +1,32 @@
-import { useEffect, useState } from 'react'
+import type { PipelineStage } from '../api/client'
 import { Icon } from './Icon'
 
-// Этапы показываются по таймеру: бэк пока не сообщает реальный прогресс.
-// Когда появится потоковый ответ (/chat/stream), этапы можно брать из него.
-const STEPS = ['Разбираю вопрос', 'Ищу в документах базы', 'Формирую ответ', 'Сверяю ссылки с документами']
-const STEP_MS = 900
+// Этапы приходят из потока /chat/stream. Разбор вопроса бывает только в режиме full,
+// поэтому показывается, только если бэкенд его прислал.
+const STEPS: { key: string; label: string; stages: PipelineStage[] }[] = [
+  { key: 'analyze', label: 'Разбираю вопрос', stages: ['analyze'] },
+  { key: 'retrieve', label: 'Ищу в документах базы', stages: ['retrieve'] },
+  { key: 'generate', label: 'Формирую ответ', stages: ['generate'] },
+  { key: 'verify', label: 'Сверяю ссылки с документами', stages: ['review', 'verify'] },
+]
 
-export function PendingSteps() {
-  const [step, setStep] = useState(0)
-
-  useEffect(() => {
-    if (step >= STEPS.length - 1) return
-    const timer = window.setTimeout(() => setStep((s) => s + 1), STEP_MS)
-    return () => window.clearTimeout(timer)
-  }, [step])
+export function PendingSteps({ stages }: { stages: PipelineStage[] }) {
+  const steps = stages.includes('analyze') ? STEPS : STEPS.slice(1)
+  const current = stages.length ? stages[stages.length - 1] : null
+  const activeIndex = current ? steps.findIndex((s) => s.stages.includes(current)) : -1
 
   return (
     <div className="pending" aria-live="polite">
-      {STEPS.map((label, i) => (
-        <div key={label} className={`step ${i < step ? 'done' : i === step ? 'active' : ''}`}>
-          <span className="step-mark">{i < step ? <Icon name="check" size={10} /> : null}</span>
-          {label}
+      {activeIndex === -1 && (
+        <div className="step active">
+          <span className="step-mark" />
+          Отправляю вопрос
+        </div>
+      )}
+      {steps.map((step, i) => (
+        <div key={step.key} className={`step ${i < activeIndex ? 'done' : i === activeIndex ? 'active' : ''}`}>
+          <span className="step-mark">{i < activeIndex ? <Icon name="check" size={10} /> : null}</span>
+          {step.label}
         </div>
       ))}
     </div>

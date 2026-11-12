@@ -8,6 +8,9 @@
 Зависимости передаются словарём deps, чтобы один код работал в сервисе orchestrator, в solution.py и в тестах:
   deps["llm_json"](messages, max_tokens, default) -> dict
   deps["retrieve"](queries, filters) -> list[context item]
+  deps["on_stage"](stage) — необязательно: сообщает этап (analyze, retrieve, generate, review, verify),
+                            нужен для потокового ответа /chat/stream
+  deps["request_id"] — необязательно: id запроса из шлюза, чтобы он совпадал во всех логах
 """
 
 import re
@@ -79,7 +82,8 @@ def finalize(draft, context, question_text, trace):
 
 def answer_question(question, history, deps, settings):
     started = time.time()
-    request_id = uuid.uuid4().hex[:12]
+    request_id = deps.get("request_id") or uuid.uuid4().hex[:12]
+    stage = deps.get("on_stage") or (lambda _name: None)
     trace = {}
     if not history:
         question, history = parse_dialog(question)
@@ -93,6 +97,7 @@ def answer_question(question, history, deps, settings):
 
     queries, event_date = heuristic_queries(question, history), None
     if mode == "full":
+        stage("analyze")
         t = time.time()
         analysis = deps["llm_json"](prompts.analyze_messages(question, history), 600, {"type": "legal"}) or {}
         trace["analyze_ms"] = int((time.time() - t) * 1000)
@@ -105,6 +110,7 @@ def answer_question(question, history, deps, settings):
         queries = list(dict.fromkeys(q for q in [*queries, *extra] if isinstance(q, str) and q.strip()))[:5]
         event_date = analysis.get("event_date")
 
+    stage("retrieve")
     t = time.time()
     context = deps["retrieve"](queries, {})
     trace["retrieve_ms"] = int((time.time() - t) * 1000)
@@ -115,6 +121,7 @@ def answer_question(question, history, deps, settings):
     if not context:
         return response("refusal", prompts.NO_CONTEXT_ANSWER, request_id, started, trace=trace)
 
+    stage("generate")
     t = time.time()
     fallback = {"status": "refusal", "answer": prompts.NO_CONTEXT_ANSWER, "missing_info": []}
     generation = deps["llm_json"](prompts.generate_messages(question, history, context, event_date),
@@ -126,6 +133,7 @@ def answer_question(question, history, deps, settings):
     trace["draft_issues"] = issue_hints(report)
 
     if mode in ("auto", "full"):
+        stage("review")
         t = time.time()
         review = deps["llm_json"](prompts.review_messages(question, history, context, draft, issue_hints(report)),
                                   settings.get("llm_max_tokens", 1500), {"verdict": "ok"}) or {}
@@ -138,6 +146,7 @@ def answer_question(question, history, deps, settings):
                 draft, report = candidate, candidate_report
                 status = str(review.get("status") or status)
 
+    stage("verify")
     draft, report = finalize(draft, context, question_text, trace)
     if status not in ("answer", "partial", "refusal", "clarification"):
         status = "answer"
