@@ -34,7 +34,7 @@
    ```
 
    Первый запуск занимает дольше: скачивается модель эмбеддингов (около 2,3 ГБ).
-4. Открыть http://localhost:8000.
+4. Открыть http://localhost:3000 (интерфейс). API: http://localhost:8000/docs.
 
 Без ключа (только чтобы проверить интерфейс): в `.env` указать `EMBEDDER_MODE=fake`, `LLM_BASE_URL=http://fake-llm:9000/v1`, `LLM_MODEL=fake`, затем запустить `docker compose --profile dev up --build`.
 
