@@ -69,6 +69,11 @@ def fake_answer(messages):
 app = FastAPI(title="fake-llm")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.post("/v1/chat/completions")
 def completions(body: dict):
     import json
