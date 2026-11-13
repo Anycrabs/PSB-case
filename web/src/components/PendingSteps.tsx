@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Icon } from './Icon'
 
 // Этапы показываются по таймеру: бэк пока не сообщает реальный прогресс.
 // Когда появится потоковый ответ (/chat/stream), этапы можно брать из него.
@@ -16,13 +15,13 @@ export function PendingSteps() {
   }, [step])
 
   return (
-    <div className="pending" aria-live="polite">
+    <ol className="steps" aria-live="polite">
       {STEPS.map((label, i) => (
-        <div key={label} className={`step ${i < step ? 'done' : i === step ? 'active' : ''}`}>
-          <span className="step-mark">{i < step ? <Icon name="check" size={10} /> : null}</span>
+        <li key={label} className={i < step ? 'done' : i === step ? 'now' : ''}>
+          <span className="dot" aria-hidden="true" />
           {label}
-        </div>
+        </li>
       ))}
-    </div>
+    </ol>
   )
 }

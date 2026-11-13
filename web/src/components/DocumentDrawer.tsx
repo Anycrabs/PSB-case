@@ -105,8 +105,9 @@ export function DocumentDrawer({ target, onNavigate, onClose }: Props) {
               aria-selected={i === index}
               className={`drawer-source ${i === index ? 'active' : ''}`}
               onClick={() => go(i)}
-              title={s.doc_title}
+              title={`${s.doc_title}, ${s.citation}`}
             >
+              <span className="drawer-source-n">{i + 1}</span>
               {s.citation}
             </button>
           ))}

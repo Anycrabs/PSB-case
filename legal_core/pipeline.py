@@ -68,6 +68,7 @@ def response(status, answer, request_id, started, **extra):
         "request_id": request_id,
         "status": status,
         "answer_text": answer,
+        "answer_marked": extra.get("answer_marked", answer),
         "sources": extra.get("sources", []),
         "missing_info": extra.get("missing_info", []),
         "verification": extra.get("verification", {"passed": True, "issues": []}),
@@ -82,6 +83,12 @@ def used_sources(context, labels):
         "id": label, "chunk_id": c["chunk_id"], "doc_id": c["doc_id"], "doc_title": c.get("doc_display") or c["doc_title"],
         "citation": c["citation"], "edition": c.get("edition", ""), "quote": c["text"][:700], "char_span": c["char_span"],
     } for label in labels if (c := by_label.get(label))]
+
+
+def marked_text(draft):
+    """Текст ответа с метками [S#] для интерфейса: номер ссылки ставится сразу после слова, без пробела."""
+    text = re.sub(r"\s+(\[\s*S\d)", r"\1", (draft or "").strip())
+    return re.sub(r"[ \t]+", " ", text)[:MAX_ANSWER_CHARS + 200]
 
 
 def finalize(draft, context, question_text, trace):
@@ -163,6 +170,7 @@ def answer_question(question, history, deps, settings):
     text = strip_markers(draft)[:MAX_ANSWER_CHARS] or prompts.NO_CONTEXT_ANSWER
     return response(
         status, text, request_id, started,
+        answer_marked=marked_text(draft) if text != prompts.NO_CONTEXT_ANSWER else text,
         sources=used_sources(context, report["labels"]),
         missing_info=[str(m) for m in generation.get("missing_info") or [] if str(m).strip()],
         verification={"passed": not report["issues"], "issues": issue_hints(report)},

@@ -7,6 +7,7 @@ import { StartScreen } from './components/StartScreen'
 import { documentsWord } from './components/plural'
 import { Panel, type PanelTab } from './components/Panel'
 import { AnswerBlock } from './components/AnswerBlock'
+import { Backdrop } from './components/Backdrop'
 import { PendingSteps } from './components/PendingSteps'
 import { DocumentDrawer, type DrawerTarget } from './components/DocumentDrawer'
 
@@ -99,24 +100,32 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${turns.length === 0 ? 'is-start' : ''}`}>
+      <Backdrop />
       <header className="header">
-        <button className="brand" onClick={newQuestion} title="На главную">
-          <span className="brand-mark">
-            <Icon name="scale" size={16} />
+        <button className="brand" onClick={newQuestion} title="На начальный экран">
+          <span className="brand-mark" aria-hidden="true">
+            §
           </span>
           <span className="brand-title">Юридический ассистент</span>
         </button>
-        <button className="ghost-btn only-wide" onClick={() => setPanel('registry')}>
-          <Icon name="book" size={16} />
-          {docs?.length ? `Реестр: ${docs.length} ${documentsWord(docs.length)}` : 'Реестр'}
+        <button
+          className="hbtn"
+          onClick={() => setPanel('registry')}
+          title={docs?.length ? `В базе ${docs.length} ${documentsWord(docs.length)}` : undefined}
+        >
+          <Icon name="book" size={17} />
+          <span className="label-wide">Документы базы</span>
+          {docs?.length ? <span className="count">{docs.length}</span> : null}
         </button>
-        <button className="ghost-btn" onClick={() => setPanel('history')}>
-          <Icon name="chat" size={16} /> История
+        <button className="hbtn" onClick={() => setPanel('history')} aria-label="История">
+          <Icon name="chat" size={17} />
+          <span className="label-wide">История</span>
         </button>
         {turns.length > 0 && (
-          <button className="line-btn" onClick={newQuestion}>
-            <Icon name="plus" size={16} /> Новый вопрос
+          <button className="hbtn primary" onClick={newQuestion} aria-label="Новый вопрос">
+            <Icon name="plus" size={16} />
+            <span className="label-new">Новый вопрос</span>
           </button>
         )}
       </header>
@@ -137,25 +146,35 @@ export default function App() {
 
         <main className="main">
           <div className="scroll">
+            <div className="page">
             {turns.length === 0 ? (
               <StartScreen docs={docs} busy={busy} onAsk={ask} onOpenRegistry={() => setPanel('registry')} />
             ) : (
               <div className="thread">
                 {turns.map((turn) => (
-                  <section key={turn.id} className="turn">
-                    <div className="question-label">Вопрос</div>
+                  <section key={turn.id} className="turn folio">
                     <h2 className="question">{turn.question}</h2>
-                    {turn.state === 'pending' && <PendingSteps />}
+                    {turn.state === 'pending' && (
+                      <>
+                        <article className="sheet glass">
+                          <PendingSteps />
+                        </article>
+                        <aside className="margin" />
+                      </>
+                    )}
                     {turn.state === 'error' && (
-                      <div className="error-box" role="alert">
-                        <Icon name="alert" />
-                        <div>
-                          <p>Ответ не получен. {turn.error}</p>
-                          <button className="line-btn" onClick={() => retry(turn.id)}>
-                            <Icon name="refresh" size={16} /> Спросить ещё раз
-                          </button>
-                        </div>
-                      </div>
+                      <>
+                        <article className="sheet glass error-box" role="alert">
+                          <Icon name="alert" />
+                          <div>
+                            <p>Ответ не получен. {turn.error}</p>
+                            <button className="line-btn" onClick={() => retry(turn.id)} disabled={busy}>
+                              <Icon name="refresh" size={16} /> Спросить ещё раз
+                            </button>
+                          </div>
+                        </article>
+                        <aside className="margin" />
+                      </>
                     )}
                     {turn.state === 'done' && turn.response && (
                       <AnswerBlock
@@ -169,10 +188,13 @@ export default function App() {
                 <ScrollAnchor trigger={`${turns.length}:${turns[turns.length - 1]?.state}`} />
               </div>
             )}
+            </div>
           </div>
           {turns.length > 0 && (
             <div className="dock">
-              <Composer busy={busy} placeholder="Уточните или задайте новый вопрос" onSend={ask} autoFocus />
+              <div className="dock-inner">
+                <Composer busy={busy} placeholder="Уточните или задайте новый вопрос" onSend={ask} autoFocus />
+              </div>
             </div>
           )}
         </main>

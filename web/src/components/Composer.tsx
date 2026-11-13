@@ -43,12 +43,7 @@ export function Composer({ busy, placeholder, onSend, autoFocus }: Props) {
         onKeyDown={onKeyDown}
         autoFocus={autoFocus}
       />
-      <button
-        className="ask-btn"
-        onClick={submit}
-        disabled={!text.trim() || busy}
-        title={busy ? 'Дождитесь ответа' : 'Enter — спросить, Shift + Enter — новая строка'}
-      >
+      <button className="ask-btn" onClick={submit} disabled={!text.trim() || busy} title={busy ? 'Дождитесь ответа' : undefined}>
         Спросить
       </button>
     </div>

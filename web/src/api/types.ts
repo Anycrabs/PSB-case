@@ -23,6 +23,7 @@ export interface ChatResponse {
   dialog_id: string | null
   status: AnswerStatus
   answer_text: string
+  answer_marked?: string // тот же ответ с метками [S1]; в старых диалогах может отсутствовать
   missing_info: string[]
   sources: Source[]
   verification: Verification

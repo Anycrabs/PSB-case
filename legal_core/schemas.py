@@ -32,6 +32,7 @@ class ChatResponse(BaseModel):
     dialog_id: Optional[str] = None
     status: Literal["answer", "partial", "refusal", "clarification"]
     answer_text: str
+    answer_marked: str = ""  # тот же ответ с метками [S#] — для ссылок в интерфейсе
     missing_info: list[str] = []
     sources: list[Source] = []
     verification: dict = {}
