@@ -8,10 +8,35 @@
 
 ## Запуск
 
+Нужен Docker (Docker Desktop). Все сервисы поднимаются одной командой, сначала бэкенд, затем интерфейс: `web` стартует только после того, как `gateway` прошёл проверку готовности.
+
+**Без ключа LLM** — чтобы посмотреть интерфейс и проверить, что стенд поднимается (ответы даёт заглушка, по смыслу они неточные):
+
 ```bash
-cp .env.example .env            # вписать LLM_API_KEY
-docker compose up --build       # интерфейс http://localhost:8000, API http://localhost:8000/docs
+cp .env.example .env                       # по умолчанию заглушка LLM и fake-эмбеддинги
+docker compose --profile dev up --build    # интерфейс http://localhost:3000
 ```
+
+**С моделью DeepSeek** — в `.env` указать `LLM_BASE_URL=https://api.deepseek.com`, `LLM_API_KEY=<ключ>`, `LLM_MODEL` (подсказки — в комментариях `.env.example`) и `EMBEDDER_MODE=local`, затем:
+
+```bash
+docker compose up --build                  # первый запуск скачивает bge-m3 (~2,3 ГБ)
+```
+
+| Адрес | Что там |
+| --- | --- |
+| http://localhost:3000 | Веб-интерфейс |
+| http://localhost:8000/docs | API шлюза (OpenAPI) |
+
+Остановить: `docker compose --profile dev down`.
+
+### Разработка интерфейса без Docker
+
+```bash
+cd web && npm ci && npm run dev            # http://localhost:5173, /api проксируется на :8000
+```
+
+Бэкенд при этом должен работать на `localhost:8000` (в Docker или локально через uvicorn).
 
 ## Сабмит на платформу
 
@@ -38,6 +63,7 @@ python eval/demo_eval.py                                               # поп�
 
 | Сервис | Порт | Что делает |
 | --- | --- | --- |
+| web | 3000 | Веб-интерфейс (React + Vite, nginx); `/api` проксируется на gateway |
 | gateway | 8000 | Внешний API `/api/v1`, диалоги, тестовая страница чата |
 | orchestrator | 8001 | Конвейер ответа |
 | retrieval | 8002 | Гибридный поиск (Qdrant dense+sparse, BM25, точные ссылки, RRF, реранкер), документы и фрагменты |
@@ -64,6 +90,8 @@ legal_core/      вся логика (функции и словари, без �
   verify.py      проверка ответа: метки, номера пунктов и статей, суммы и сроки, названия законов
   pipeline.py    answer_question(); разбор диалога «Пользователь: … Ассистент: …» из текста вопроса
 services/        gateway, orchestrator, retrieval, embedder (FastAPI)
+web/             интерфейс: React + TypeScript + Vite; Dockerfile (сборка + nginx), nginx.conf.template
+  src/components  стартовый экран, ответ и источники, шторка документа, история и реестр
 submission/      solution.py, build_zip.py, requirements.txt
 scripts/         build_index.py, ask.py
 eval/            demo_eval.py, compare_demo.py
