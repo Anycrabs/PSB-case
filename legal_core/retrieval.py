@@ -89,13 +89,20 @@ def hybrid_search(index, query, embed_fn, settings, filters=None, qdrant=None):
     """Возвращает кандидатов [{'idx', 'chunk_id', 'score', 'channels', 'rerank_score'?}]."""
     k = settings["top_k"]
     allowed = allowed_mask(index, filters)
-    emb = embed_fn([query])
-    query_vec = emb["dense"][0]
-    query_weights = emb["sparse"][0] if emb.get("sparse") else None
+    try:
+        emb = embed_fn([query])
+        query_vec = emb["dense"][0]
+        query_weights = emb["sparse"][0] if emb.get("sparse") else None
+    except Exception as exc:  # noqa: BLE001 — без эмбеддинга вопроса ищем по BM25 и точным ссылкам
+        print(f"Эмбеддинг запроса недоступен ({type(exc).__name__}): поиск без векторов", flush=True)
+        query_vec, query_weights = None, None
     if not index["meta"].get("has_sparse"):
         query_weights = None
 
-    if qdrant is not None:
+    if query_vec is None:
+        semantic = []
+        lexical = search_lexical(index, query, None, allowed, k)
+    elif qdrant is not None:
         semantic = qdrant_search(qdrant["client"], qdrant["collection"], query_vec, query_weights, filters, k)
         lexical = search_lexical(index, query, None, allowed, k) if query_weights is None else []
     else:

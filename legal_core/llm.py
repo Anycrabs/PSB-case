@@ -44,9 +44,15 @@ def chat(messages, settings, json_mode=False, max_tokens=2000, temperature=None)
                 last_error = f"HTTP {response.status_code}: {response.text[:300]}"
                 time.sleep(1.5 * (attempt + 1))
                 continue
+            if response.status_code >= 400:
+                print(f"LLM: HTTP {response.status_code}: {response.text[:300]}", flush=True)
             response.raise_for_status()
-            message = response.json()["choices"][0]["message"]
-            return message.get("content") or ""
+            choice = response.json()["choices"][0]
+            content = choice["message"].get("content") or ""
+            if not content.strip():
+                print(f"LLM: пустой content, finish_reason={choice.get('finish_reason')}, "
+                      f"поля message: {sorted(choice['message'])}", flush=True)
+            return content
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             last_error = str(exc)
             time.sleep(1.5 * (attempt + 1))
@@ -80,5 +86,6 @@ def chat_json(messages, settings, max_tokens=2000, default=None):
                 {"role": "user", "content": "Ответ не является корректным JSON. Верни только JSON по схеме."},
             ]
     if default is not None:
+        print(f"LLM: ответ не разобран как JSON, взят запасной вариант. Начало ответа: {raw[:200]!r}", flush=True)
         return default
     raise ValueError("Модель не вернула корректный JSON")

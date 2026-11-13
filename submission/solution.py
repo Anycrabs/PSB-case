@@ -38,6 +38,7 @@ from legal_core.parsing import read_knowledge_base  # noqa: E402
 from legal_core.pipeline import answer_question  # noqa: E402
 from legal_core.retrieval import retrieve_context  # noqa: E402
 from legal_core.llm import chat_json  # noqa: E402
+from legal_core.prompts import NO_CONTEXT_ANSWER  # noqa: E402
 
 STARTED = time.time()
 FALLBACK = ("Не удалось сформировать обоснованный ответ по базе знаний за отведённое время. "
@@ -121,13 +122,29 @@ def main():
         index = build_or_load_index(kb_path, settings)
     log(f"Индекс готов: {len(index['chunks'])} фрагментов")
 
+    answers, lock, done = {}, threading.Lock(), {"n": 0, "spent": 0.0}
+    stats = {"status": {}, "fallback": 0, "slowest": 0.0}
+    emb_state = {"fails": 0}
+
+    def embed_query(texts):
+        # после 3 сбоев подряд перестаём ждать эмбеддер: каждый сбой — до 15 с повторов
+        if emb_state["fails"] >= 3:
+            raise RuntimeError("эмбеддинги отключены после повторных ошибок")
+        try:
+            result = embed_texts(texts, settings)
+        except Exception:
+            with lock:
+                emb_state["fails"] += 1
+                if emb_state["fails"] == 3:
+                    log("Эмбеддер 3 раза подряд не ответил: дальше поиск только по BM25")
+            raise
+        emb_state["fails"] = 0
+        return result
+
     deps = {
         "llm_json": lambda messages, max_tokens, default: chat_json(messages, settings, max_tokens, default),
-        "retrieve": lambda queries, filters: retrieve_context(
-            index, queries, lambda texts: embed_texts(texts, settings), settings, filters),
+        "retrieve": lambda queries, filters: retrieve_context(index, queries, embed_query, settings, filters),
     }
-
-    answers, lock, done = {}, threading.Lock(), {"n": 0, "spent": 0.0}
 
     def watchdog():
         time.sleep(max(5, budget + 60 - (time.time() - STARTED)))
@@ -151,18 +168,26 @@ def main():
                 settings["pipeline_mode"] = "fast"
                 log(f"Прогноз {projected:.0f}s > бюджета: переключаюсь в режим fast")
         t = time.time()
+        status = "error"
         try:
             result = answer_question(question, [], deps, settings)
-            text = result["answer_text"]
+            text, status = result["answer_text"], result["status"]
         except Exception:  # noqa: BLE001 — один упавший вопрос не должен ронять прогон
+            log(f"Вопрос {qid}: ошибка")
             traceback.print_exc()
             text = FALLBACK
         with lock:
+            spent = time.time() - t
+            stats["status"][status] = stats["status"].get(status, 0) + 1
+            stats["fallback"] += text in (FALLBACK, NO_CONTEXT_ANSWER)
+            stats["slowest"] = max(stats["slowest"], spent)
             answers[qid] = text
             done["n"] += 1
-            done["spent"] += time.time() - t
+            done["spent"] += spent
             if done["n"] % 10 == 0 or done["n"] == len(questions):
-                log(f"Готово {done['n']}/{len(questions)}")
+                log(f"Готово {done['n']}/{len(questions)}; статусы: {stats['status']}; "
+                    f"заглушек: {stats['fallback']}; среднее {done['spent'] / done['n']:.1f}s, "
+                    f"максимум {stats['slowest']:.1f}s; режим: {settings['pipeline_mode']}")
         return qid, text
 
     with ThreadPoolExecutor(max_workers=settings["max_workers"]) as pool:
