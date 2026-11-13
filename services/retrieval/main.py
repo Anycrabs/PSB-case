@@ -38,8 +38,14 @@ def load_docs(folder):
 def connect_qdrant(index):
     client = qdrant_client(SETTINGS)
     collection = SETTINGS["qdrant_collection"]
-    exists = client.collection_exists(collection)
-    if not exists or client.count(collection).count != len(index["chunks"]):
+    stale = not client.collection_exists(collection)
+    if not stale:
+        vectors = client.get_collection(collection).config.params.vectors
+        stale = (
+            client.count(collection).count != len(index["chunks"])
+            or vectors["dense"].size != index["dense"].shape[1]
+        )
+    if stale:
         qdrant_upload(client, index, collection)
     return {"client": client, "collection": collection}
 

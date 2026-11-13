@@ -39,7 +39,11 @@ def is_up_to_date(out, fingerprint, settings):
     if not meta_path.exists():
         return False
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    return meta.get("data_fingerprint") == fingerprint and meta.get("embedding_model") == settings["embedding_model"]
+    return (
+        meta.get("data_fingerprint") == fingerprint
+        and meta.get("embedding_model") == settings["embedding_model"]
+        and meta.get("embedder_mode") == settings["embedder_mode"]
+    )
 
 
 def progress(done, total):
