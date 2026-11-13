@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getDialog, listDocuments, sendQuestion } from './api/client'
+import { getDialog, listDocuments, streamQuestion, type PipelineStage } from './api/client'
 import type { ChatResponse, DocumentSummary, Source } from './api/types'
 import { Composer } from './components/Composer'
 import { Icon } from './components/Icon'
@@ -15,6 +15,7 @@ interface Turn {
   id: string
   question: string
   state: 'pending' | 'done' | 'error'
+  stages: PipelineStage[]
   response?: ChatResponse
   error?: string
 }
@@ -39,7 +40,9 @@ export default function App() {
 
   const runTurn = useCallback(async (turnId: string, question: string, currentDialog: string | null) => {
     try {
-      const response = await sendQuestion(question, currentDialog)
+      const onStage = (stage: PipelineStage) =>
+        setTurns((all) => all.map((t) => (t.id === turnId ? { ...t, stages: [...t.stages, stage] } : t)))
+      const response = await streamQuestion(question, currentDialog, onStage)
       if (response.dialog_id) setDialogId(response.dialog_id)
       setTurns((all) => all.map((t) => (t.id === turnId ? { ...t, state: 'done', response } : t)))
     } catch (err) {
@@ -52,14 +55,14 @@ export default function App() {
     const text = question.trim()
     if (!text || busy) return
     const id = nextTurnId()
-    setTurns((all) => [...all, { id, question: text, state: 'pending' }])
+    setTurns((all) => [...all, { id, question: text, state: 'pending', stages: [] }])
     void runTurn(id, text, dialogId)
   }
 
   const retry = (turnId: string) => {
     const turn = turns.find((t) => t.id === turnId)
     if (!turn || busy) return
-    setTurns((all) => all.map((t) => (t.id === turnId ? { ...t, state: 'pending', error: undefined } : t)))
+    setTurns((all) => all.map((t) => (t.id === turnId ? { ...t, state: 'pending', stages: [], error: undefined } : t)))
     void runTurn(turnId, turn.question, dialogId)
   }
 
@@ -81,6 +84,7 @@ export default function App() {
       loaded.push({
         id: nextTurnId(),
         question: msg.content,
+        stages: [],
         state: reply?.response ? 'done' : 'error',
         response: reply?.response,
         error: reply?.response ? undefined : 'Ответ не сохранился.',
@@ -157,7 +161,7 @@ export default function App() {
                     {turn.state === 'pending' && (
                       <>
                         <article className="sheet glass">
-                          <PendingSteps />
+                          <PendingSteps stages={turn.stages} />
                         </article>
                         <aside className="margin" />
                       </>
