@@ -10,17 +10,17 @@
 
 Нужен Docker (Docker Desktop). Все сервисы поднимаются одной командой, сначала бэкенд, затем интерфейс: `web` стартует только после того, как `gateway` прошёл проверку готовности.
 
-**Без ключа LLM** — чтобы посмотреть интерфейс и проверить, что стенд поднимается (ответы даёт заглушка, по смыслу они неточные):
+**С моделью DeepSeek** (как в `.env.example` по умолчанию: DeepSeek + bge-m3 в контейнере):
 
 ```bash
-cp .env.example .env                       # по умолчанию заглушка LLM и fake-эмбеддинги
-docker compose --profile dev up --build    # интерфейс http://localhost:3000
+cp .env.example .env                       # вписать LLM_API_KEY
+docker compose up --build                  # интерфейс http://localhost:3000; первый запуск скачивает bge-m3 (~2,3 ГБ)
 ```
 
-**С моделью DeepSeek** — в `.env` указать `LLM_BASE_URL=https://api.deepseek.com`, `LLM_API_KEY=<ключ>`, `LLM_MODEL` (подсказки — в комментариях `.env.example`) и `EMBEDDER_MODE=local`, затем:
+**Без ключа LLM** — чтобы посмотреть интерфейс и проверить, что стенд поднимается (ответы даёт заглушка, по смыслу они неточные): в `.env` раскомментировать блок заглушки (`LLM_BASE_URL=http://fake-llm:9000/v1`, `LLM_API_KEY=fake`, `LLM_MODEL=fake`, `EMBEDDER_MODE=fake`) и запустить с профилем `dev`:
 
 ```bash
-docker compose up --build                  # первый запуск скачивает bge-m3 (~2,3 ГБ)
+docker compose --profile dev up --build    # интерфейс http://localhost:3000
 ```
 
 | Адрес | Что там |
