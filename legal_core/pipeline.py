@@ -36,11 +36,30 @@ def parse_dialog(text):
     return turns[last_user]["content"], turns[:last_user]
 
 
+ABBREVIATIONS = {
+    "НДС": "налог на добавленную стоимость",
+    "НДФЛ": "налог на доходы физических лиц",
+    "МРОТ": "минимальный размер оплаты труда",
+    "УСН": "упрощенная система налогообложения",
+    "УПД": "универсальный передаточный документ",
+    "ПДн": "персональные данные",
+    "СЭД": "система электронного документооборота",
+    "ГД": "генеральный директор",
+}
+
+
+def expand_abbreviations(text):
+    """«ставка НДС» -> «ставка НДС (налог на добавленную стоимость)»: в текстах законов сокращений нет."""
+    for short, full in ABBREVIATIONS.items():
+        text = re.sub(rf"(?<![\wА-Яа-яЁё]){short}(?![\wА-Яа-яЁё])", f"{short} ({full})", text)
+    return text
+
+
 def heuristic_queries(question, history):
-    queries = [question]
+    queries = [expand_abbreviations(question)]
     if history:
         joined = " ".join(t["content"] for t in history[-4:]) + " " + question
-        queries.append(joined[-700:])
+        queries.append(expand_abbreviations(joined[-700:]))
     return queries
 
 
@@ -118,7 +137,7 @@ def answer_question(question, history, deps, settings):
     t = time.time()
     fallback = {"status": "refusal", "answer": prompts.NO_CONTEXT_ANSWER, "missing_info": []}
     generation = deps["llm_json"](prompts.generate_messages(question, history, context, event_date),
-                                  settings.get("llm_max_tokens", 1500), fallback) or fallback
+                                  settings.get("llm_max_tokens", 3000), fallback) or fallback
     trace["generate_ms"] = int((time.time() - t) * 1000)
     draft = str(generation.get("answer") or "").strip() or prompts.NO_CONTEXT_ANSWER
     status = str(generation.get("status") or "answer")
@@ -128,7 +147,7 @@ def answer_question(question, history, deps, settings):
     if mode in ("auto", "full"):
         t = time.time()
         review = deps["llm_json"](prompts.review_messages(question, history, context, draft, issue_hints(report)),
-                                  settings.get("llm_max_tokens", 1500), {"verdict": "ok"}) or {}
+                                  settings.get("llm_max_tokens", 3000), {"verdict": "ok"}) or {}
         trace["review_ms"] = int((time.time() - t) * 1000)
         trace["review"] = {"verdict": review.get("verdict"), "problems": review.get("problems")}
         candidate = str(review.get("answer") or "").strip()

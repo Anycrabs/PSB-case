@@ -214,9 +214,39 @@ def chunk_document(doc):
                 "amends": doc.get("amends"),
                 "char_span": [offset, offset + len(piece)],
                 "text": piece,
-                "embed_text": f"{header} | {doc.get('label', '')}\n{piece}",
+                "embed_text": f"{header} | {doc.get('label', '')} {search_topic(doc)}\n{piece}",
             })
     return chunks
+
+
+# Главы НК РФ по номерам статей: заголовки статей одинаковые («Налоговые ставки» в ст. 164, 224, 284),
+# поэтому без названия налога вопрос «ставка НДС» не находит нужную статью. Только для поиска:
+# в текст фрагмента и в ответ это не попадает.
+NK_CHAPTERS = [
+    (106, 142, "налоговые правонарушения ответственность налоговые санкции штраф"),
+    (143, 178, "НДС налог на добавленную стоимость"),
+    (179, 206, "акцизы"),
+    (207, 233, "НДФЛ налог на доходы физических лиц зарплата"),
+    (234, 245, "страховые взносы"),
+    (246, 333, "налог на прибыль организаций"),
+]
+LAW_TOPICS = [
+    ("ТК РФ", "трудовой кодекс работник работодатель"),
+    ("КоАП", "административное правонарушение административный штраф"),
+    ("152-ФЗ", "персональные данные ПДн"),
+    ("оплаты труда", "МРОТ минимальная зарплата"),
+]
+
+
+def search_topic(doc):
+    """Ключевые слова темы закона для поискового заголовка фрагмента."""
+    title = doc.get("title", "")
+    words = [topic for marker, topic in LAW_TOPICS if marker in title]
+    article = str(doc.get("article") or "")
+    if title.startswith("НК РФ") and article.split(".")[0].isdigit():
+        number = int(article.split(".")[0])
+        words += [topic for low, high, topic in NK_CHAPTERS if low <= number <= high]
+    return " ".join(words)
 
 
 def chunk_documents(docs):

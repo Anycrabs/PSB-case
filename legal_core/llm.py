@@ -74,6 +74,24 @@ def parse_json_loose(text):
         raise
 
 
+def salvage_answer(raw):
+    """Достаёт текст ответа из испорченного JSON (обрыв по лимиту токенов) или из обычного текста."""
+    text = re.sub(r"<think>.*?(</think>|$)", "", raw or "", flags=re.S).strip()
+    match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)', text, flags=re.S)
+    if match:
+        try:
+            text = json.loads('"' + match.group(1).rstrip("\\") + '"').strip()
+        except json.JSONDecodeError:
+            text = match.group(1).replace('\\"', '"').strip()
+    elif text.lstrip().startswith(("{", "[", "```")):
+        return ""
+    if text and text[-1] not in ".!?»)]":
+        cut = max(text.rfind(". "), text.rfind("] "), text.rfind("! "), text.rfind("? "))
+        if cut > len(text) // 3:
+            text = text[:cut + 1].strip()
+    return text
+
+
 def chat_json(messages, settings, max_tokens=2000, default=None):
     """Вызов LLM с разбором JSON; при неудачном разборе — одна повторная попытка, затем default."""
     for attempt in range(2):
@@ -86,6 +104,10 @@ def chat_json(messages, settings, max_tokens=2000, default=None):
                 {"role": "user", "content": "Ответ не является корректным JSON. Верни только JSON по схеме."},
             ]
     if default is not None:
+        salvaged = salvage_answer(raw) if "answer" in default else ""
+        if salvaged:
+            print(f"LLM: JSON не разобран, текст ответа извлечён из сырого вывода ({len(salvaged)} симв.)", flush=True)
+            return {**default, "status": "answer", "answer": salvaged}
         print(f"LLM: ответ не разобран как JSON, взят запасной вариант. Начало ответа: {raw[:200]!r}", flush=True)
         return default
     raise ValueError("Модель не вернула корректный JSON")

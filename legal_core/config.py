@@ -40,7 +40,7 @@ def get_settings():
         "llm_model": _env("LLM_MODEL", "OPENAI_MODEL", "GEN_MODEL", default="deepseek/deepseek-v4.1-flash"),
         "llm_timeout": _float(["LLM_TIMEOUT"], 90.0),
         "llm_temperature": _float(["TEMPERATURE", "LLM_TEMPERATURE"], 0.0),
-        "llm_max_tokens": max(_int(["MAX_TOKENS"], 1500), 1500),
+        "llm_max_tokens": max(_int(["MAX_TOKENS"], 3000), 3000),
         "llm_json_mode": _env("LLM_JSON_MODE", default="1") == "1",
         # Эмбеддинги: remote — /embeddings прокси (по умолчанию тот же адрес и ключ, что у LLM);
         # local — FlagEmbedding в процессе; fake — для тестов

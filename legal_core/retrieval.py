@@ -155,7 +155,8 @@ def context_item(index, idx, label, cand=None):
 
 
 WHOLE_DOC_CHARS = 6000  # короткие документы компании (договор, регламент, письмо) отдаём целиком
-WHOLE_DOC_TOP = 3       # …если документ в первых WHOLE_DOC_TOP результатах поиска
+WHOLE_DOC_TOP = 3
+LEAD_POINT_RE = re.compile(r"\s*(?:Статья \d+[^\n]*\n+\s*)?1\.\s")       # …если документ в первых WHOLE_DOC_TOP результатах поиска
 
 
 def doc_chunks(index, doc_id):
@@ -179,13 +180,17 @@ def build_context(index, candidate_lists, settings):
         for candidates in candidate_lists:
             if rank < len(candidates):
                 add(candidates[rank]["idx"], candidates[rank])
-    # 2) короткие документы компании из верхних результатов — целиком
+    # 2) короткие документы из верхних результатов — целиком; у длинного закона — п. 1 с общим правилом
+    #    (общая ставка, общий порядок), иначе в контекст попадают только частные случаи и исключения
     for candidates in candidate_lists:
         for cand in candidates[:WHOLE_DOC_TOP]:
             chunk = index["chunks"][cand["idx"]]
-            if chunk["doc_type"] == "law":
-                continue
             siblings = doc_chunks(index, chunk["doc_id"])
+            if chunk["doc_type"] == "law" and sum(len(index["chunks"][i]["text"]) for i in siblings) > WHOLE_DOC_CHARS:
+                lead = next((i for i in siblings if LEAD_POINT_RE.match(index["chunks"][i]["text"])), None)
+                if lead is not None:
+                    add(lead)
+                continue
             if sum(len(index["chunks"][i]["text"]) for i in siblings) <= WHOLE_DOC_CHARS:
                 for i in siblings:
                     add(i)

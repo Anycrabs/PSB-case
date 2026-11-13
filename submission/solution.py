@@ -146,6 +146,7 @@ def main():
         "retrieve": lambda queries, filters: retrieve_context(index, queries, embed_query, settings, filters),
     }
 
+
     def watchdog():
         time.sleep(max(5, budget + 60 - (time.time() - STARTED)))
         with lock:
@@ -183,7 +184,7 @@ def main():
             stats["slowest"] = max(stats["slowest"], spent)
             answers[qid] = text
             done["n"] += 1
-            done["spent"] += spent
+            done["spent"] += time.time() - t
             if done["n"] % 10 == 0 or done["n"] == len(questions):
                 log(f"Готово {done['n']}/{len(questions)}; статусы: {stats['status']}; "
                     f"заглушек: {stats['fallback']}; среднее {done['spent'] / done['n']:.1f}s, "
@@ -196,7 +197,69 @@ def main():
     with lock:
         write_submission(questions, answers)
     log(f"Создан submission.csv: {len(questions)} ответов")
+    run_probe(deps, settings, budget, kb_path)
 
+
+def run_probe(deps, settings, budget, kb_path):
+    """Зонд: после записи submission.csv отвечает на демо- и тестовые вопросы (lc_probe.py) нашим решением
+    и baseline организаторов (lc_baseline.py), сравнивает их LLM-судьёй по методике регламента (lc_judge.py)
+    и печатает ответы и итоговый балл в лог. submission.csv не меняется. Работает только из ZIP."""
+    try:
+        from lc_probe import PROBE
+        import lc_baseline
+        import lc_judge
+    except ImportError:
+        return
+    if time.time() - STARTED > budget * 0.5:
+        log("Зонд пропущен: мало времени")
+        return
+    log(f"Зонд: {len(PROBE)} вопросов, сравнение с baseline через LLM-судью")
+    try:
+        base_docs = lc_baseline.load_documents(Path(kb_path))
+    except Exception as exc:  # noqa: BLE001
+        log(f"Зонд: baseline не загрузил базу ({type(exc).__name__}), сравнения не будет")
+        base_docs = None
+    deadline = STARTED + budget - 60
+
+    def one(item):
+        group, pid, question, golden = item
+        if time.time() > deadline:
+            return group, pid, None, f"PROBE {group}:{pid} пропущен — время"
+        try:
+            result = answer_question(question, [], deps, settings)
+        except Exception as exc:  # noqa: BLE001
+            return group, pid, None, f"PROBE {group}:{pid} [error] {type(exc).__name__}: {exc}"
+        ours = " ".join(result["answer_text"].split())
+        trace = result.get("trace", {})
+        cites = "; ".join(f"{c['doc'][:40]} {c['citation']}" for c in trace.get("context", [])[:8])
+        review = trace.get("review") or {}
+        lines = [f"PROBE {group}:{pid} [{result['status']}] {ours}",
+                 f"PROBE {group}:{pid} контекст: {cites}"]
+        if review.get("verdict") == "fixed" or trace.get("dropped_sentences"):
+            lines.append(f"PROBE {group}:{pid} проверка: {review.get('verdict')} {review.get('problems') or ''} "
+                         f"вырезано: {trace.get('dropped_sentences') or []}")
+        score = None
+        if base_docs is not None and golden and time.time() < deadline:
+            try:
+                import httpx
+                with httpx.Client(timeout=90.0) as client:
+                    baseline = lc_baseline.generate(client, question, lc_baseline.select_documents(client, question, base_docs))
+                score, reason = lc_judge.judge_pair(question, golden, ours, baseline, settings)
+                lines.append(f"PROBE {group}:{pid} baseline: {baseline}")
+                lines.append(f"PROBE {group}:{pid} судья: {'—' if score is None else f'{score:.2f}'} {reason}")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"PROBE {group}:{pid} судья: ошибка {type(exc).__name__}")
+        return group, pid, score, "\n".join(lines)
+
+    with ThreadPoolExecutor(max_workers=settings["max_workers"]) as pool:
+        results = list(pool.map(one, PROBE))
+    for _, _, _, text in results:
+        print(text, flush=True)
+    for group in ("demo", "bench", None):
+        scores = [score for g, _, score, _ in results if group is None or g == group]
+        total = lc_judge.summarize(scores)
+        log(f"ЗОНД {group or 'всего'}: оценено {total['n']}; MatchRate {total['match_rate']:.3f}; "
+            f"WinRate {total['win_rate']:.3f}; Score x100 = {total['score'] * 100:.1f}")
 
 if __name__ == "__main__":
     main()

@@ -21,6 +21,22 @@ def flatten_imports(source):
     return re.sub(r"from legal_core import (\w+)", r"import lc_\1 as \1", source)
 
 
+def probe_module():
+    """Вопросы зонда как .py-модуль (платформа переносит только корневые .py): демо-вопросы организаторов
+    с эталоном из demo_output.csv и расширенный набор data/eval/bench.csv. solution.py после записи
+    submission.csv отвечает на них, сравнивает с baseline организаторов через LLM-судью и печатает итог в лог."""
+    import csv
+
+    def rows(path):
+        with open(path, encoding="utf-8-sig") as fh:
+            return list(csv.DictReader(fh))
+
+    golden = {r["id"]: r["answer"] for r in rows(ROOT / "data" / "demo" / "demo_output.csv")}
+    probe = [("demo", r["id"], r["question"], golden.get(r["id"], "")) for r in rows(ROOT / "data" / "demo" / "demo_questions.csv")]
+    probe += [("bench", r["id"], r["question"], r["golden"]) for r in rows(ROOT / "data" / "eval" / "bench.csv")]
+    return "# Сгенерировано build_zip.py (data/demo, data/eval/bench.csv)\nPROBE = " + repr(probe) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(ROOT / "dist" / "submission.zip"))
@@ -30,6 +46,9 @@ def main():
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("solution.py", flatten_imports((ROOT / "submission" / "solution.py").read_text(encoding="utf-8")))
         zf.write(ROOT / "submission" / "requirements.txt", "requirements.txt")
+        zf.writestr("lc_probe.py", probe_module())
+        zf.writestr("lc_judge.py", flatten_imports((ROOT / "eval" / "judge.py").read_text(encoding="utf-8")))
+        zf.write(ROOT / "eval" / "baseline_solution.py", "lc_baseline.py")
         for name in MODULES:
             source = (ROOT / "legal_core" / f"{name}.py").read_text(encoding="utf-8")
             zf.writestr(f"lc_{name}.py", flatten_imports(source))
