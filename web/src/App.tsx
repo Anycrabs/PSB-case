@@ -4,8 +4,8 @@ import type { ChatResponse, DocumentSummary, Source } from './api/types'
 import { Composer } from './components/Composer'
 import { Icon } from './components/Icon'
 import { StartScreen } from './components/StartScreen'
-import { documentsWord } from './components/plural'
 import { Panel, type PanelTab } from './components/Panel'
+import { Sidebar } from './components/Sidebar'
 import { AnswerBlock } from './components/AnswerBlock'
 import { Backdrop } from './components/Backdrop'
 import { PendingSteps } from './components/PendingSteps'
@@ -29,6 +29,7 @@ export default function App() {
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null)
   const [panel, setPanel] = useState<PanelTab | null>(null)
   const [docs, setDocs] = useState<DocumentSummary[] | null>(null)
+  const [sideOpen, setSideOpen] = useState(false)
 
   useEffect(() => {
     listDocuments()
@@ -66,15 +67,41 @@ export default function App() {
     void runTurn(turnId, turn.question, dialogId)
   }
 
-  const newQuestion = () => {
+  const newQuestion = useCallback(() => {
     setDialogId(null)
     setTurns([])
     setDrawer(null)
     setPanel(null)
-  }
+    setSideOpen(false)
+  }, [])
+
+  const findDocument = useCallback(() => {
+    setSideOpen(false)
+    setPanel('registry')
+  }, [])
+
+  // N — новый вопрос, / — поиск документа (когда курсор не в поле ввода)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target
+      if (t instanceof HTMLElement && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const key = e.key.toLowerCase()
+      if (key === 'n' || key === 'т') {
+        e.preventDefault()
+        newQuestion()
+      } else if (e.key === '/' || e.key === '.') {
+        e.preventDefault()
+        findDocument()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [newQuestion, findDocument])
 
   const loadDialog = async (id: string) => {
     setPanel(null)
+    setSideOpen(false)
     const dialog = await getDialog(id)
     const loaded: Turn[] = []
     for (let i = 0; i < dialog.messages.length; i++) {
@@ -100,39 +127,29 @@ export default function App() {
 
   const openDocument = (doc: DocumentSummary) => {
     setPanel(null)
+    setSideOpen(false)
     setDrawer({ docId: doc.doc_id, title: doc.title, siblings: [] })
   }
 
   return (
     <div className={`app ${turns.length === 0 ? 'is-start' : ''}`}>
       <Backdrop />
-      <header className="header">
-        <button className="brand" onClick={newQuestion} title="На начальный экран">
-          <span className="brand-mark" aria-hidden="true">
-            §
-          </span>
-          <span className="brand-title">Юридический ассистент</span>
-        </button>
-        <button
-          className="hbtn"
-          onClick={() => setPanel('registry')}
-          title={docs?.length ? `В базе ${docs.length} ${documentsWord(docs.length)}` : undefined}
-        >
-          <Icon name="book" size={17} />
-          <span className="label-wide">Документы базы</span>
-          {docs?.length ? <span className="count">{docs.length}</span> : null}
-        </button>
-        <button className="hbtn" onClick={() => setPanel('history')} aria-label="История">
-          <Icon name="chat" size={17} />
-          <span className="label-wide">История</span>
-        </button>
-        {turns.length > 0 && (
-          <button className="hbtn primary" onClick={newQuestion} aria-label="Новый вопрос">
-            <Icon name="plus" size={16} />
-            <span className="label-new">Новый вопрос</span>
-          </button>
-        )}
-      </header>
+      <Sidebar
+        open={sideOpen}
+        docs={docs}
+        currentDialogId={dialogId}
+        activeDocId={drawer?.docId ?? null}
+        refreshKey={`${dialogId}:${turns.filter((t) => t.state !== 'pending').length}`}
+        onNewQuestion={newQuestion}
+        onFindDocument={findDocument}
+        onOpenDocument={openDocument}
+        onSelectDialog={loadDialog}
+        onShowHistory={() => {
+          setSideOpen(false)
+          setPanel('history')
+        }}
+        onClose={() => setSideOpen(false)}
+      />
 
       <div className="body">
         {panel && (
@@ -149,10 +166,24 @@ export default function App() {
         )}
 
         <main className="main">
+          <div className="topbar">
+            <button className="icon-btn menu-btn" onClick={() => setSideOpen(true)} aria-label="Открыть меню">
+              <Icon name="menu" />
+            </button>
+            <nav className="crumb" aria-label="Где вы">
+              <b>Вопрос</b>
+              <span aria-hidden="true">/</span>
+              <span className="crumb-cur">{turns.length ? turns[0].question : 'новый'}</span>
+            </nav>
+            <span className="check-chip" title="Цифры, даты и ссылки в ответе сверяются с текстом документов">
+              <i />
+              <span className="label-wide">Проверка ответов включена</span>
+            </span>
+          </div>
           <div className="scroll">
             <div className="page">
             {turns.length === 0 ? (
-              <StartScreen docs={docs} busy={busy} onAsk={ask} onOpenRegistry={() => setPanel('registry')} />
+              <StartScreen docs={docs} busy={busy} onAsk={ask} />
             ) : (
               <div className="thread">
                 {turns.map((turn) => (
