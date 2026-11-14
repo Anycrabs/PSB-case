@@ -109,6 +109,25 @@ services:
     environment: {PORT: "9000"}
     command: ["uvicorn", "devtools.fake_llm:app", "--host", "0.0.0.0", "--port", "9000"]
 
+  # Локальная копия прокси платформы для eval/local_platform.py: docker compose --profile eval up -d platform-proxy
+  # Генерация уходит в LLM из .env (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL) или, если задан GIGACHAT_CREDENTIALS,
+  # в GigaChat API (тогда и веб-интерфейс ходит сюда: LLM_BASE_URL=http://platform-proxy:9100/v1).
+  # Эмбеддинги — в embedder (bge-m3).
+  platform-proxy:
+    <<: *python
+    profiles: [eval]
+    build: {context: ., dockerfile: docker/python.Dockerfile, args: {SERVICE: gateway}}
+    environment:
+      PORT: "9100"
+      UPSTREAM_BASE_URL: ${LLM_BASE_URL:-}
+      UPSTREAM_API_KEY: ${LLM_API_KEY:-}
+      UPSTREAM_MODEL: ${LLM_MODEL:-}
+      EMBEDDER_URL: http://embedder:8003
+    command: ["uvicorn", "devtools.platform_proxy:app", "--host", "0.0.0.0", "--port", "9100"]
+    ports: ["9100:9100"]
+    depends_on:
+      embedder: {condition: service_healthy}
+
 networks:
   legal-net: {}
 

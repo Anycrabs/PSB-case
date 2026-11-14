@@ -6,10 +6,15 @@
 
 import re
 
+# Меняйте при любом изменении правил нарезки: индекс с другой версией считается устаревшим и пересобирается.
+CHUNKER_VERSION = "2026-11-13.1"  # служебные строки Гаранта вне поиска, голые заголовки приклеены к тексту
+
 TARGET_CHARS = 900   # соседние пункты одной статьи (или одного документа без статей) склеиваем до этого размера
 MAX_CHARS = 1500     # длиннее — режем по абзацам, а слишком длинные абзацы — по предложениям
 OVERLAP_CHARS = 200  # перекрытие при разрезании длинного блока
 HEADING_CHARS = 120  # блок короче и без статьи/пункта — это голый заголовок
+MIN_PIECE_CHARS = 200  # при разрезании длинного блока кусок короче не отделяем
+MIN_SEARCHABLE_CHARS = 20  # меньше содержательного текста («4.», только пометки Гаранта) — не отдельный фрагмент
 
 SECTION_RE = re.compile(r"^(раздел|часть)\s+([IVXLC\d]+)\.?\s*(.*)$", re.I)
 CHAPTER_RE = re.compile(r"^глава\s+([\dIVXLC]+(?:\.\d+)?)\.?\s*(.*)$", re.I)
@@ -17,6 +22,24 @@ ARTICLE_RE = re.compile(r"^статья\s+(\d+(?:\.\d+)*)\.?\s*(.*)$", re.I)
 POINT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){0,3})\.\s+(?=[«\"(A-Za-zА-Яа-яЁё])(.*)$")  # «1.», «3.2.»; «1)» — подпункт, не режем
 SKIP_LINE_RE = re.compile(r"^(Источник:|URL:|Дата выгрузки:)", re.I)
 DEFINITION_RE = re.compile(r"основные понятия|термины и определения|понятия и термины|определения", re.I)
+# Служебные пометки выгрузки Гаранта: «Статья 70 изменена с 1 сентября 2026 г. - Федеральный закон…»,
+# «Федеральным законом от … в статью 112 внесены изменения…», «Действие положений пункта 4.5 …».
+# Для модели они полезны (даты редакций) и остаются в тексте фрагмента, но в поиске это шум:
+# одинаковые слова «изменен», «Федеральный закон», «2026» есть в десятках фрагментов.
+SERVICE_LINE_RE = re.compile(
+    r"^\s*(?:[\w.]+\s+){0,4}"
+    r"(?:изменен[аоы]?|дополнен[аоы]?|утратил[аои]? силу|изложен[аоы]? в новой редакции|внесены изменения)\b"
+    r"[^\n]*Федеральн\w* закон"
+    r"|^\s*Федеральным законом от [^\n]*(?:изложен[аоы]? в новой редакции|внесены изменения)"
+    r"|^\s*Действие положений\b",
+    re.I,
+)
+
+
+def strip_service(text):
+    """Текст без служебных строк Гаранта — для поискового представления фрагмента (только у законов)."""
+    kept = [line for line in text.split("\n") if not SERVICE_LINE_RE.match(line)]
+    return "\n".join(kept).strip()
 
 
 def classify_line(line):
@@ -112,7 +135,7 @@ def parent_key(block):
     return block["chapter"] or block["section"] or "root"
 
 
-def merge_small(blocks):
+def merge_small(blocks, is_law=False):
     """Склеивает короткие соседние блоки одной статьи; голые заголовки приклеивает к следующему блоку."""
     merged, carry = [], None
     for block in blocks:
@@ -123,7 +146,11 @@ def merge_small(blocks):
             text = carry["text"] + "\n" + text
             block = {**block, "start": carry["start"]}
             carry = None
-        if len(text) < HEADING_CHARS and block["kind"] in ("section", "chapter", "preamble"):
+        # голый заголовок (раздел, глава, статья) или блок только из служебных пометок — приклеиваем к следующему:
+        # сам по себе он ничего не отвечает, но даёт следующему фрагменту контекст
+        searchable = strip_service(text) if is_law else text
+        is_heading = len(searchable) < HEADING_CHARS and block["kind"] in ("section", "chapter", "preamble", "article")
+        if is_heading or len(searchable) < MIN_SEARCHABLE_CHARS:
             carry = {"text": text, "start": block["start"]}
             continue
         prev = merged[-1] if merged else None
@@ -161,7 +188,8 @@ def split_large(text, start):
         return [(text, start)]
     pieces, buf, buf_start, pos = [], "", start, start
     for unit in split_units(text):
-        if len(buf) + len(unit) > MAX_CHARS and buf.strip():
+        # короткий хвост («4.» перед длинным абзацем) не режем в отдельный кусок — он ничего не значит без продолжения
+        if len(buf) + len(unit) > MAX_CHARS and len(buf.strip()) >= MIN_PIECE_CHARS:
             pieces.append((buf.strip(), buf_start))
             tail = buf[-OVERLAP_CHARS:]
             cut = tail.find(" ")
@@ -185,7 +213,8 @@ def point_range(points):
 def chunk_document(doc):
     chunks = []
     display = doc.get("display_title") or doc["title"]
-    for block in merge_small(split_blocks(doc["text"])):
+    is_law = doc["doc_type"] == "law"
+    for block in merge_small(split_blocks(doc["text"]), is_law):
         parent = parent_key(block)
         block = {**block, "point": point_range(block["points"])}
         citation = citation_for(block)
@@ -214,7 +243,7 @@ def chunk_document(doc):
                 "amends": doc.get("amends"),
                 "char_span": [offset, offset + len(piece)],
                 "text": piece,
-                "embed_text": f"{header} | {doc.get('label', '')} {search_topic(doc)}\n{piece}",
+                "embed_text": f"{header} | {doc.get('label', '')} {search_topic(doc)}\n{(strip_service(piece) if is_law else piece) or piece}",
             })
     return chunks
 

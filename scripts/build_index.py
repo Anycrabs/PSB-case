@@ -20,6 +20,7 @@ from legal_core.config import get_settings  # noqa: E402
 from legal_core.embeddings import embed_texts_batched  # noqa: E402
 from legal_core.index import build_index, qdrant_client, qdrant_upload, save_index  # noqa: E402
 from legal_core.parsing import read_knowledge_base  # noqa: E402
+from legal_core.chunking import CHUNKER_VERSION  # noqa: E402
 
 
 def data_fingerprint(folder):
@@ -43,6 +44,7 @@ def is_up_to_date(out, fingerprint, settings):
         meta.get("data_fingerprint") == fingerprint
         and meta.get("embedding_model") == settings["embedding_model"]
         and meta.get("embedder_mode") == settings["embedder_mode"]
+        and meta.get("chunker_version") == CHUNKER_VERSION
     )
 
 

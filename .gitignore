@@ -6,3 +6,4 @@ index/*
 !index/.gitkeep
 dist/
 data/kb/
+eval_runs/

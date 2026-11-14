@@ -63,6 +63,8 @@ def fake_answer(messages):
         return analyze(user)
     if "строгий проверяющий" in system:
         return {"verdict": "ok", "problems": []}
+    if "строгий судья" in system:  # eval/judge.py: заглушка всегда ставит «сопоставимо», чтобы проверить цепочку
+        return {"verdict": "equal", "a_fabricated": False, "b_fabricated": False, "reason": "заглушка судьи"}
     return generate(user)
 
 

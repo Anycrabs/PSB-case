@@ -30,9 +30,26 @@ def _float(names, default):
         return default
 
 
+WARNED = set()
+
+
+def _secret(*names, default=""):
+    """Ключ API. Комментарий вместо ключа («LLM_API_KEY=   # <-- ЗАПОЛНИТЬ» в .env) или не-ASCII символы
+    дают в HTTP-заголовке UnicodeEncodeError без объяснений, поэтому такой ключ считаем пустым и пишем почему."""
+    value = _env(*names, default=default)
+    if value and (value.startswith("#") or not value.isascii()):
+        if names[0] not in WARNED:
+            WARNED.add(names[0])
+            print(f"ВНИМАНИЕ: {names[0]} в .env не задан — вместо ключа там комментарий или русские буквы "
+                  f"({value[:20]!r}). Запросы пойдут без ключа; впишите ключ без комментария в конце строки.",
+                  flush=True)
+        return ""
+    return value
+
+
 def get_settings():
     llm_base = _env("LLM_BASE_URL", "OPENAI_BASE_URL", "BASE_URL", default="https://api.deepseek.com").rstrip("/")
-    llm_key = _env("LLM_API_KEY", "OPENAI_API_KEY")
+    llm_key = _secret("LLM_API_KEY", "OPENAI_API_KEY")
     return {
         # Языковая модель: прокси платформы или любой OpenAI-совместимый API
         "llm_base_url": llm_base,
@@ -47,14 +64,14 @@ def get_settings():
         "embedder_mode": _env("EMBEDDER_MODE", default="remote"),
         "embedding_model": _env("EMB_MODEL", "EMBEDDING_MODEL", default="baai/bge-m3"),
         "embedding_base_url": _env("EMBEDDING_BASE_URL", default=llm_base).rstrip("/"),
-        "embedding_api_key": _env("EMBEDDER_API_KEY", "EMBEDDING_API_KEY", default=llm_key),
+        "embedding_api_key": _secret("EMBEDDER_API_KEY", "EMBEDDING_API_KEY", default=llm_key),
         "embedding_batch": _int(["EMBEDDING_BATCH"], 32),
         "embedding_max_length": _int(["EMBEDDING_MAX_LENGTH"], 2048),
         "embedding_fp16": _env("EMBEDDING_FP16", default="0") == "1",
         # Реранкер: включён, если задана модель (на платформе — RERANKER_MODEL)
         "reranker_model": _env("RERANKER_MODEL"),
         "reranker_url": _env("RERANKER_URL", default=llm_base).rstrip("/"),
-        "reranker_api_key": _env("RERANKER_API_KEY", default=llm_key),
+        "reranker_api_key": _secret("RERANKER_API_KEY", default=llm_key),
         # Индекс и поиск (свои имена: TOP_K / RERANKER_TOP_N платформы рассчитаны на учебный пример)
         "index_dir": _env("INDEX_DIR", default="index"),
         "data_dir": _env("DATA_DIR", default="data"),
@@ -62,7 +79,7 @@ def get_settings():
         "qdrant_url": _env("QDRANT_URL", default="http://localhost:6333"),
         "qdrant_collection": _env("QDRANT_COLLECTION", default="legal_chunks"),
         "top_k": _int(["SEARCH_K"], 40),
-        "rerank_k": _int(["RERANK_K"], 30),
+        "rerank_k": _int(["RERANK_K"], 20),  # реранкер переупорядочивает ~20 лучших кандидатов: дальше он почти не меняет итог
         "context_chunks": _int(["CONTEXT_CHUNKS"], 8),
         "context_chars": _int(["CONTEXT_CHARS"], 14000),
         "rrf_k": _int(["RRF_K"], 60),

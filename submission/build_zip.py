@@ -33,7 +33,8 @@ def probe_module():
 
     golden = {r["id"]: r["answer"] for r in rows(ROOT / "data" / "demo" / "demo_output.csv")}
     probe = [("demo", r["id"], r["question"], golden.get(r["id"], "")) for r in rows(ROOT / "data" / "demo" / "demo_questions.csv")]
-    probe += [("bench", r["id"], r["question"], r["golden"]) for r in rows(ROOT / "data" / "eval" / "bench.csv")]
+    # в зонд — только вопросы с эталоном; остальные в bench.csv нужны для проверки поиска (eval/bench_retrieval.py)
+    probe += [("bench", r["id"], r["question"], r["golden"]) for r in rows(ROOT / "data" / "eval" / "bench.csv") if r["golden"]]
     return "# Сгенерировано build_zip.py (data/demo, data/eval/bench.csv)\nPROBE = " + repr(probe) + "\n"
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from legal_core.lexical import build_bm25, search_bm25
+from legal_core.chunking import CHUNKER_VERSION
 
 
 # ---------- сборка, сохранение, загрузка ----------
@@ -41,6 +42,7 @@ def build_index(chunks, embeddings, settings):
     meta = {
         "embedding_model": settings["embedding_model"],
         "embedder_mode": settings["embedder_mode"],
+        "chunker_version": CHUNKER_VERSION,
         "dim": int(embeddings["dense"].shape[1]) if len(chunks) else 0,
         "count": len(chunks),
         "has_sparse": embeddings["sparse"] is not None,

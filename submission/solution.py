@@ -37,6 +37,7 @@ from legal_core.index import build_index  # noqa: E402
 from legal_core.parsing import read_knowledge_base  # noqa: E402
 from legal_core.pipeline import answer_question  # noqa: E402
 from legal_core.retrieval import retrieve_context  # noqa: E402
+from legal_core.chunking import CHUNKER_VERSION  # noqa: E402
 from legal_core.llm import chat_json  # noqa: E402
 from legal_core.prompts import NO_CONTEXT_ANSWER  # noqa: E402
 
@@ -85,7 +86,7 @@ def write_submission(questions, answers, path="submission.csv"):
 
 def build_or_load_index(kb_path, settings):
     digest = hashlib.sha1(Path(kb_path).read_bytes()).hexdigest()[:16]
-    cache = Path("/tmp") / f"psb_index_{digest}_{settings['embedder_mode']}_{settings['embedding_model'].replace('/', '_')}.pkl"
+    cache = Path("/tmp") / f"psb_index_{digest}_{CHUNKER_VERSION}_{settings['embedder_mode']}_{settings['embedding_model'].replace('/', '_')}.pkl"
     if cache.exists():
         log(f"Индекс из кэша {cache.name}")
         return pickle.loads(cache.read_bytes())
@@ -204,6 +205,8 @@ def run_probe(deps, settings, budget, kb_path):
     """Зонд: после записи submission.csv отвечает на демо- и тестовые вопросы (lc_probe.py) нашим решением
     и baseline организаторов (lc_baseline.py), сравнивает их LLM-судьёй по методике регламента (lc_judge.py)
     и печатает ответы и итоговый балл в лог. submission.csv не меняется. Работает только из ZIP."""
+    if os.getenv("SKIP_PROBE"):  # локальная копия платформы (eval/local_platform.py) оценивает сама
+        return
     try:
         from lc_probe import PROBE
         import lc_baseline
@@ -256,10 +259,14 @@ def run_probe(deps, settings, budget, kb_path):
     for _, _, _, text in results:
         print(text, flush=True)
     for group in ("demo", "bench", None):
-        scores = [score for g, _, score, _ in results if group is None or g == group]
-        total = lc_judge.summarize(scores)
+        part = [r for r in results if group is None or r[0] == group]
+        total = lc_judge.summarize([score for _, _, score, _ in part])
+        # Faithfulness: доля ответов, где судья не нашёл выдуманных или противоречащих эталону фактов
+        judged = [text for _, _, score, text in part if score is not None]
+        fabricated = sum("выдуманный факт в нашем ответе" in text for text in judged)
         log(f"ЗОНД {group or 'всего'}: оценено {total['n']}; MatchRate {total['match_rate']:.3f}; "
-            f"WinRate {total['win_rate']:.3f}; Score x100 = {total['score'] * 100:.1f}")
+            f"WinRate {total['win_rate']:.3f}; Score x100 = {total['score'] * 100:.1f}; "
+            f"без выдуманных фактов: {len(judged) - fabricated} из {len(judged)}")
 
 if __name__ == "__main__":
     main()
