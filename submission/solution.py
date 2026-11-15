@@ -43,7 +43,7 @@ from legal_core.pipeline import answer_question, extractive_answer, heuristic_qu
 from legal_core.prebuilt import attach_vectors, load_store  # noqa: E402
 from legal_core.retrieval import hybrid_search, retrieve_context  # noqa: E402
 from legal_core.chunking import CHUNKER_VERSION  # noqa: E402
-from legal_core.llm import chat_json  # noqa: E402
+from legal_core.llm import chat, chat_json  # noqa: E402
 from legal_core.prompts import NO_CONTEXT_ANSWER  # noqa: E402
 
 STARTED = time.time()
@@ -153,6 +153,36 @@ def quick_answer(index, settings, question):
         return FALLBACK
 
 
+SIMPLE_SYSTEM = ("Ты — юридический ассистент. Ответь на вопрос только по приложенным фрагментам документов: "
+                 "сначала прямой ответ (да/нет, сумма, срок), затем документ и пункт. 1–3 предложения. "
+                 "Не выдумывай нормы, суммы, сроки и номера пунктов. Если в вопросе неверная цифра — поправь её "
+                 "по фрагментам. Если ответа во фрагментах нет — скажи, что в базе знаний этого нет.")
+
+
+def simple_answer(index, settings, question):
+    """Запасной путь как у baseline организаторов: один простой вызов LLM (без JSON и проверки) по лучшим
+    найденным фрагментам. Нужен, когда основной конвейер упал или не успевает: сырой текст пунктов
+    (quick_answer) судья оценивает намного ниже baseline."""
+    try:
+        text, history = parse_dialog(question)
+        queries = heuristic_queries(text, history)
+        local = {**settings, "reranker_model": ""}
+        ranked = hybrid_search(index, queries[-1], None, local)
+        chunks = [index["chunks"][c["idx"]] for c in ranked[:5]]
+        context = "\n\n".join(
+            f"{c.get('doc_display') or c.get('doc_title') or 'документ'}, {c.get('citation', '')}\n"
+            f"{c.get('text', '')[:1500]}" for c in chunks)
+        out = chat([{"role": "system", "content": SIMPLE_SYSTEM},
+                    {"role": "user", "content": f"Фрагменты:\n{context}\n\nВопрос:\n{question}"}],
+                   settings, json_mode=False, max_tokens=700)
+        out = " ".join((out or "").split())
+        if out:
+            return out
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    return quick_answer(index, settings, question)
+
+
 def main():
     settings = get_settings()
     settings["max_workers"] = max(1, min(16, settings["max_workers"]))
@@ -235,10 +265,13 @@ def main():
             text, status = result["answer_text"], result["status"]
             if result.get("trace", {}).get("extractive"):
                 status = "без LLM"
+                if time.time() - STARTED < budget - 30:
+                    text = simple_answer(index, settings, question)
+                    status = "простой"
         except Exception:  # noqa: BLE001 — один упавший вопрос не должен ронять прогон
-            log(f"Вопрос {qid}: ошибка, ответ из текста найденных пунктов")
+            log(f"Вопрос {qid}: ошибка конвейера, простой вызов LLM")
             traceback.print_exc()
-            text = quick_answer(index, settings, question)
+            text = simple_answer(index, settings, question)
         with lock:
             spent = time.time() - t
             stats["status"][status] = stats["status"].get(status, 0) + 1
