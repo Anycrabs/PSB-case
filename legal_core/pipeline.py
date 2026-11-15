@@ -16,7 +16,8 @@ import uuid
 
 from legal_core import prompts
 from legal_core.guards import detect_injection, sanitize_history
-from legal_core.verify import check_answer, drop_sentences, issue_hints, strip_markers
+from legal_core.dates import applicability, extract_event_period
+from legal_core.verify import add_missing_caveats, caveat_hints, check_answer, drop_sentences, issue_hints, strip_markers
 
 ROLE_RE = re.compile(r"^\s*(Пользователь|Юрист|Клиент|User|Ассистент|Assistant|Бот)\s*:\s*", re.I | re.M)
 MAX_ANSWER_CHARS = 9500
@@ -91,8 +92,89 @@ def marked_text(draft):
     return re.sub(r"[ \t]+", " ", text)[:MAX_ANSWER_CHARS + 200]
 
 
+QUESTION_STOP = {"какой", "какая", "какие", "каким", "можно", "нужно", "должен", "если", "договор", "договору",
+                 "договора", "этого", "сколько", "почему", "через", "после", "наша", "наши", "нашему"}
+
+
+def _stems(text):
+    words = re.findall(r"[а-яёa-z0-9]+", (text or "").lower())
+    return {w[:5] for w in words if len(w) >= 4 and w not in QUESTION_STOP}
+
+
+def excerpt(text, question="", limit=420, ignore=""):
+    """Строки фрагмента, больше всего совпадающие с вопросом (в исходном порядке), до limit символов.
+    ignore — название документа: слова из него («Северный Склад», «поставки») есть во всех его строках
+    и не помогают выбрать нужный пункт."""
+    lines = [" ".join(line.split()) for line in (text or "").split("\n") if len(line.strip()) > 25]
+    if not lines:
+        return " ".join((text or "").split())[:limit], 0
+    wanted = _stems(question) - _stems(ignore)
+    scored = sorted(range(len(lines)), key=lambda i: (-len(wanted & _stems(lines[i])), i))
+    best = len(wanted & _stems(lines[scored[0]]))
+    picked, used = [], 0
+    for i in scored:
+        if picked and (len(wanted & _stems(lines[i])) == 0 or used + len(lines[i]) > limit):
+            continue
+        picked.append(i)
+        used += len(lines[i])
+        if used >= limit * 0.6 or len(picked) >= 3:
+            break
+    flat = " ".join(lines[i] for i in sorted(picked))
+    if len(flat) > limit:
+        cut = flat.rfind(". ", 120, limit)
+        flat = flat[:cut + 1] if cut != -1 else flat[:limit].rsplit(" ", 1)[0] + "…"
+    return flat, best
+
+
+def extractive_answer(chunks, question="", limit=2):
+    """Ответ без LLM: дословные строки лучших найденных пунктов с названием документа и пунктом.
+    Нужен, когда модель не ответила или не хватило времени: заглушка «не удалось ответить» получает 0,
+    а точный текст нужного пункта — частичное совпадение с эталоном и ничего не выдумывает.
+    Если найденные документы совпадают с вопросом не больше чем одним словом — честно говорим, что ответа нет."""
+    scored, seen, top = [], set(), 0
+    for rank, chunk in enumerate(chunks):
+        key = (chunk.get("doc_id"), chunk.get("citation"))
+        if key not in seen:
+            seen.add(key)
+            title = f"{chunk.get('doc_display') or ''} {chunk.get('doc_title') or ''}"
+            text, score = excerpt(chunk.get("text", ""), question, ignore=title)
+            scored.append((-score, rank, chunk, text, score))
+            top = max(top, len(_stems(question) & _stems(title + " " + chunk.get("text", ""))))
+    scored.sort(key=lambda item: item[:2])  # лучшее совпадение строк с вопросом, при равенстве — ранг поиска
+    parts = []
+    for _, _, chunk, text, score in scored:
+        if parts and score < 2:
+            continue
+        doc = chunk.get("doc_display") or chunk.get("doc_title") or "документ"
+        parts.append(f"{doc}, {chunk.get('citation', '')}: {text}")
+        if len(parts) >= limit:
+            break
+    if not parts or (question and top <= 1 and len(_stems(question)) >= 3):
+        return prompts.NO_CONTEXT_ANSWER
+    return "По базе знаний: " + " ".join(p if p.endswith((".", "…")) else p + "." for p in parts)
+
+
+def edition_hints(labels, context, period):
+    """Подсказка проверяющему: ответ опирается на редакцию, которая не действовала на дату события."""
+    if not period:
+        return []
+    by_label = {c["label"]: c for c in context}
+    used = [by_label[l] for l in labels if l in by_label]
+    wrong = [c for c in used if applicability(c, period) == "no"]
+    right = [c for c in context if applicability(c, period) == "yes"]
+    if not wrong or any(applicability(c, period) == "yes" for c in used):
+        return []
+    hint = (f"ответ опирается на {wrong[0].get('doc_display') or wrong[0]['doc_title']} [{wrong[0]['label']}], "
+            f"а она не действовала на дату события ({period['label']})")
+    if right:
+        hint += f"; применима {right[0].get('doc_display') or right[0]['doc_title']} [{right[0]['label']}]"
+    return [hint]
+
+
 def finalize(draft, context, question_text, trace):
     """Убирает предложения, которые так и не подтвердились, и метки [S#]."""
+    if not draft.lstrip().startswith("В базе знаний н"):
+        draft = add_missing_caveats(draft, context)
     report = check_answer(draft, context, question_text)
     if report["issues"]:
         trimmed = drop_sentences(draft, [item["index"] for item in report["issues"]])
@@ -117,7 +199,10 @@ def answer_question(question, history, deps, settings):
     if detect_injection(question):
         return response("refusal", prompts.ATTACK_ANSWER, request_id, started, trace={"guard": "attack"})
 
-    queries, event_date = heuristic_queries(question, history), None
+    queries = heuristic_queries(question, history)
+    # дата события (для выбора редакции) — сначала из самой реплики, потом из прошлых реплик пользователя
+    period = extract_event_period(question) or extract_event_period(
+        " ".join(t["content"] for t in history if t["role"] == "user"))
     if mode == "full":
         t = time.time()
         analysis = deps["llm_json"](prompts.analyze_messages(question, history), 600, {"type": "legal"}) or {}
@@ -129,10 +214,13 @@ def answer_question(question, history, deps, settings):
             return response("refusal", prompts.ATTACK_ANSWER, request_id, started, trace=trace)
         extra = [analysis.get("standalone_question"), *(analysis.get("subquestions") or [])]
         queries = list(dict.fromkeys(q for q in [*queries, *extra] if isinstance(q, str) and q.strip()))[:5]
-        event_date = analysis.get("event_date")
+        event_date = str(analysis.get("event_date") or "")
+        if not period and re.fullmatch(r"\d{4}-\d{2}-\d{2}", event_date):
+            period = {"start": event_date, "end": event_date, "label": event_date}
 
     t = time.time()
-    context = deps["retrieve"](queries, {})
+    trace["event_period"] = period
+    context = deps["retrieve"](queries, {"event_period": period} if period else {})
     trace["retrieve_ms"] = int((time.time() - t) * 1000)
     trace["queries"] = queries
     trace["context"] = [{"label": c["label"], "chunk_id": c["chunk_id"], "citation": c["citation"],
@@ -143,18 +231,39 @@ def answer_question(question, history, deps, settings):
 
     t = time.time()
     fallback = {"status": "refusal", "answer": prompts.NO_CONTEXT_ANSWER, "missing_info": []}
-    generation = deps["llm_json"](prompts.generate_messages(question, history, context, event_date),
-                                  settings.get("llm_max_tokens", 3000), fallback) or fallback
+    try:
+        generation = deps["llm_json"](prompts.generate_messages(question, history, context, period),
+                                      settings.get("llm_max_tokens", 3000), fallback) or fallback
+    except Exception as exc:  # noqa: BLE001 — LLM недоступна: отвечаем текстом найденных пунктов
+        print(f"Генерация не удалась ({type(exc).__name__}: {str(exc)[:120]}): ответ из текста фрагментов", flush=True)
+        generation = fallback
     trace["generate_ms"] = int((time.time() - t) * 1000)
+    if generation is fallback:  # модель не ответила или ответ не разобран — не превращаем это в отказ
+        best = sorted(context, key=lambda c: -c.get("score", 0.0))
+        text = extractive_answer(best, question)
+        trace["extractive"] = True
+        return response("partial", text, request_id, started, trace=trace,
+                        sources=used_sources(context, [c["label"] for c in best[:2]]))
     draft = str(generation.get("answer") or "").strip() or prompts.NO_CONTEXT_ANSWER
     status = str(generation.get("status") or "answer")
     report = check_answer(draft, context, question_text)
-    trace["draft_issues"] = issue_hints(report)
+    hints = issue_hints(report) + edition_hints(report["labels"], context, period) + caveat_hints(draft, context)
+    trace["draft_issues"] = hints
 
-    if mode in ("auto", "full"):
+    # проверку пропускаем, если solution.py сообщил, что время на исходе: черновик лучше заглушки
+    late = time.time() > settings.get("review_until", float("inf"))
+    wrong_edition = bool(edition_hints(report["labels"], context, period))
+    # в режиме fast проверку всё равно запускаем, если ответ взял не ту редакцию: такой ответ неверен по сути
+    want_review = mode in ("auto", "full") or wrong_edition
+    trace["review_skipped"] = late and want_review
+    if want_review and not late:
         t = time.time()
-        review = deps["llm_json"](prompts.review_messages(question, history, context, draft, issue_hints(report)),
-                                  settings.get("llm_max_tokens", 3000), {"verdict": "ok"}) or {}
+        try:
+            review = deps["llm_json"](prompts.review_messages(question, history, context, draft, hints, period),
+                                      settings.get("llm_max_tokens", 3000), {"verdict": "ok"}) or {}
+        except Exception as exc:  # noqa: BLE001 — проверка необязательна, черновик уже есть
+            print(f"Проверка ответа не удалась ({type(exc).__name__}): остаётся черновик", flush=True)
+            review = {"verdict": "ok"}
         trace["review_ms"] = int((time.time() - t) * 1000)
         trace["review"] = {"verdict": review.get("verdict"), "problems": review.get("problems")}
         candidate = str(review.get("answer") or "").strip()

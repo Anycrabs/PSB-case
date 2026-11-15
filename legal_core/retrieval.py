@@ -6,6 +6,7 @@
 
 import re
 
+from legal_core.dates import applicability
 from legal_core.index import allowed_mask, qdrant_search, search_dense, search_lexical
 
 ARTICLE_REF_RE = re.compile(r"(?:\bст\.?|\bстать[яиеюей]+)\s*(\d+(?:\.\d+)*)", re.I)
@@ -90,11 +91,14 @@ def hybrid_search(index, query, embed_fn, settings, filters=None, qdrant=None):
     k = settings["top_k"]
     allowed = allowed_mask(index, filters)
     try:
+        if embed_fn is None:  # поиск без векторов по запросу (быстрый ответ без API в solution.py)
+            raise LookupError
         emb = embed_fn([query])
         query_vec = emb["dense"][0]
         query_weights = emb["sparse"][0] if emb.get("sparse") else None
     except Exception as exc:  # noqa: BLE001 — без эмбеддинга вопроса ищем по BM25 и точным ссылкам
-        print(f"Эмбеддинг запроса недоступен ({type(exc).__name__}): поиск без векторов", flush=True)
+        if embed_fn is not None:
+            print(f"Эмбеддинг запроса недоступен ({type(exc).__name__}): поиск без векторов", flush=True)
         query_vec, query_weights = None, None
     if not index["meta"].get("has_sparse"):
         query_weights = None
@@ -163,9 +167,36 @@ def doc_chunks(index, doc_id):
     return [i for i, c in enumerate(index["chunks"]) if c["doc_id"] == doc_id]
 
 
-def build_context(index, candidate_lists, settings):
-    """Контекст для LLM: лучшие фрагменты по каждому запросу без дублей; короткие документы компании
-    из верхних результатов — целиком; связанные доп. соглашения; документный порядок, метки S1..Sn."""
+def edition_counterparts(index, chosen_idx, period):
+    """Другие редакции тех же документов (тот же заголовок, другой срок действия), когда в вопросе есть
+    дата события: та, что действовала на эту дату, обязана попасть в контекст, даже если поиск поднял
+    только действующую. Короткий документ — целиком, длинный — пункты с той же ссылкой."""
+    if not period:
+        return []
+    chunks = index["chunks"]
+    titles = {chunks[i]["doc_title"] for i in chosen_idx if chunks[i].get("valid_from") or chunks[i].get("valid_to")}
+    citations = {(chunks[i]["doc_title"], chunks[i]["citation"]) for i in chosen_idx}
+    chosen_docs = {chunks[i]["doc_id"] for i in chosen_idx}
+    extra = []
+    for title in titles:
+        editions = {c["doc_id"] for c in chunks if c["doc_title"] == title}
+        # первой — редакция, применимая к дате события
+        ordered = sorted(editions, key=lambda d: applicability(chunks[doc_chunks(index, d)[0]], period) != "yes")
+        for doc_id in ordered:
+            siblings = doc_chunks(index, doc_id)
+            if doc_id in chosen_docs and applicability(chunks[siblings[0]], period) != "yes":
+                continue
+            if sum(len(chunks[i]["text"]) for i in siblings) <= WHOLE_DOC_CHARS:
+                extra += siblings
+            else:
+                extra += [i for i in siblings if (title, chunks[i]["citation"]) in citations]
+    return [i for i in dict.fromkeys(extra) if i not in chosen_idx]
+
+
+def build_context(index, candidate_lists, settings, period=None):
+    """Контекст для LLM: лучшие фрагменты по каждому запросу без дублей; другие редакции документа, если
+    в вопросе есть дата события; короткие документы компании из верхних результатов — целиком; связанные
+    доп. соглашения; документный порядок, метки S1..Sn."""
     per_query = settings["context_chunks"]
     budget = settings["context_chars"]
     chosen, seen = [], set()
@@ -180,6 +211,8 @@ def build_context(index, candidate_lists, settings):
         for candidates in candidate_lists:
             if rank < len(candidates):
                 add(candidates[rank]["idx"], candidates[rank])
+    for i in edition_counterparts(index, list(seen), period):
+        add(i, {"idx": i, "score": 0.0, "channels": ["edition"]})
     # 2) короткие документы из верхних результатов — целиком; у длинного закона — п. 1 с общим правилом
     #    (общая ставка, общий порядок), иначе в контекст попадают только частные случаи и исключения
     for candidates in candidate_lists:
@@ -198,6 +231,8 @@ def build_context(index, candidate_lists, settings):
         add(i, {"idx": i, "score": 0.0, "channels": ["linked"]})
 
     selected, used = [], 0
+    # редакция на дату события идёт в контекст первой: без неё ответ гарантированно неверен
+    chosen = [c for c in chosen if "edition" in c["channels"]] + [c for c in chosen if "edition" not in c["channels"]]
     for cand in chosen:  # порядок важности: сначала лучшие по поиску
         size = len(index["chunks"][cand["idx"]]["text"])
         if used + size > budget and selected:
@@ -211,4 +246,4 @@ def build_context(index, candidate_lists, settings):
 def retrieve_context(index, queries, embed_fn, settings, filters=None, qdrant=None):
     """Поиск по всем подвопросам + сборка контекста. Это и есть «подгрузка в LLM» (get_context)."""
     candidate_lists = [hybrid_search(index, q, embed_fn, settings, filters, qdrant) for q in queries]
-    return build_context(index, candidate_lists, settings)
+    return build_context(index, candidate_lists, settings, (filters or {}).get("event_period"))

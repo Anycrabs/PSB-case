@@ -27,14 +27,28 @@ services:
     networks: [legal-net]
     restart: unless-stopped
 
+  # Однократная загрузка bge-m3 в том hf-cache. От root только выставляет владельца тома (app),
+  # саму модель качает от app — поэтому embedder и indexer не спорят за файлы кэша и не падают
+  # с PermissionError при первом запуске. Повторные запуски — несколько секунд (модель уже в кэше).
+  model-init:
+    build: *embeddings-build
+    env_file: .env
+    user: "0"
+    command: ["sh", "-c", "chown -R app:app /models && (chown -R app:app /index 2>/dev/null || true) && exec env HOME=/home/app setpriv --reuid=app --regid=app --init-groups python scripts/prepare_models.py"]
+    volumes:
+      - hf-cache:/models
+      - ./index:/index
+    networks: [legal-net]
+    restart: "no"
+
   # Одноразовая сборка индекса: пропускается, если документы не менялись
   indexer:
     build: *embeddings-build
     env_file: .env
-    user: "0"
     environment:
       DATA_DIR: /data
       INDEX_DIR: /index
+      HF_HUB_OFFLINE: "1"   # модель уже скачал model-init
     command: ["sh", "-c", "python scripts/build_index.py --data /data/${KB_PATH:-knowledge-base.zip} --out /index --skip-existing"]
     volumes:
       - ./data:/data:ro
@@ -42,12 +56,16 @@ services:
       - hf-cache:/models
     networks: [legal-net]
     restart: "no"
+    depends_on:
+      model-init: {condition: service_completed_successfully}
 
   embedder:
     <<: *python
     build: *embeddings-build
-    environment: {PORT: "8003"}
+    environment: {PORT: "8003", HF_HUB_OFFLINE: "1"}
     volumes: [hf-cache:/models]
+    depends_on:
+      model-init: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
       interval: 10s

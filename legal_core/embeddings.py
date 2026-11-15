@@ -117,6 +117,47 @@ def embed_texts(texts, settings):
     raise ValueError(f"Неизвестный EMBEDDER_MODE: {mode}")
 
 
+def embed_dense_parallel(texts, settings, deadline=None, workers=None):
+    """Dense-векторы пачками в несколько потоков, с крайним сроком (time.time()).
+    Возвращает (матрица n × dim или None, сколько строк посчитано); не посчитанные строки — нули,
+    такие фрагменты находятся только лексическим поиском. Нужна там, где время ограничено (solution.py)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not texts:
+        return None, 0
+    step = max(1, settings["embedding_batch"])
+    batches = [(start, texts[start:start + step]) for start in range(0, len(texts), step)]
+    workers = max(1, min(workers or settings.get("max_workers", 4), 8, len(batches)))
+    results, errors = {}, []
+
+    def run(start, batch):
+        if deadline and time.time() > deadline:
+            return start, None
+        try:
+            return start, embed_texts(batch, settings)["dense"]
+        except Exception as exc:  # noqa: BLE001 — пачка без векторов лучше упавшего прогона
+            errors.append(f"{type(exc).__name__}: {exc}")
+            return start, None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run, start, batch) for start, batch in batches]
+        for future in as_completed(futures):
+            start, dense = future.result()
+            if dense is not None:
+                results[start] = dense
+    if not results:
+        if errors:
+            print(f"Эмбеддинги не посчитаны: {errors[0]}", flush=True)
+        return None, 0
+    dim = next(iter(results.values())).shape[1]
+    matrix = np.zeros((len(texts), dim), dtype=np.float32)
+    done = 0
+    for start, dense in results.items():
+        matrix[start:start + len(dense)] = dense
+        done += len(dense)
+    return matrix, done
+
+
 def embed_texts_batched(texts, settings, batch=256, progress=None):
     """Для индексации большой базы: считает пачками и склеивает результат."""
     dense_parts, sparse_all, has_sparse = [], [], True

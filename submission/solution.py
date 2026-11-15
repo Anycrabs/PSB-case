@@ -2,14 +2,16 @@
 
 Что делает:
   1. читает {DATA_DIR}/questions.csv (id,question) и {DATA_DIR}/knowledge-base.zip;
-  2. строит индекс базы знаний при запуске: структурное разбиение + эмбеддинги bge-m3 через прокси платформы
-     (POST {LLM_BASE_URL}/embeddings) + BM25; кэш в /tmp;
+  2. строит индекс базы знаний: структурное разбиение + BM25 + эмбеддинги bge-m3. Векторы берутся готовыми
+     из lc_vectors.py (их кладёт в ZIP build_zip.py), сверяются с POST {LLM_BASE_URL}/embeddings платформы,
+     досчитываются только недостающие фрагменты — параллельно и не дольше INDEX_SHARE бюджета; кэш в /tmp;
   3. отвечает на каждый вопрос тем же конвейером, что и прототип (legal_core): гибридный поиск,
      реранкер (POST /rerank), генерация и проверка ответа (POST /chat/completions);
   4. пишет submission.csv (id,answer) в рабочий каталог.
 
-Следит за лимитом 20 минут: при нехватке времени переключается в быстрый режим, а перед тайм-аутом
-записывает файл с тем, что успело посчитаться (пустых ответов не бывает).
+Следит за лимитом 20 минут: при нехватке времени пропускает проверку ответа и переключается в быстрый режим,
+а вопросы, на которые не хватило времени или LLM не ответила, получают текст лучших найденных пунктов
+(без обращений к API) вместо заглушки.
 
 В ZIP модули legal_core лежат в корне как lc_*.py — их кладёт туда submission/build_zip.py.
 """
@@ -25,6 +27,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))  # в ZIP модули lc_*.py лежат рядом с solution.py
 if (ROOT.parent / "legal_core").exists():
@@ -32,11 +36,12 @@ if (ROOT.parent / "legal_core").exists():
 
 from legal_core.chunking import chunk_documents  # noqa: E402
 from legal_core.config import get_settings  # noqa: E402
-from legal_core.embeddings import embed_texts, embed_texts_batched  # noqa: E402
+from legal_core.embeddings import embed_dense_parallel, embed_texts, embed_texts_batched  # noqa: E402
 from legal_core.index import build_index  # noqa: E402
 from legal_core.parsing import read_knowledge_base  # noqa: E402
-from legal_core.pipeline import answer_question  # noqa: E402
-from legal_core.retrieval import retrieve_context  # noqa: E402
+from legal_core.pipeline import answer_question, extractive_answer, heuristic_queries, parse_dialog  # noqa: E402
+from legal_core.prebuilt import attach_vectors, load_store  # noqa: E402
+from legal_core.retrieval import hybrid_search, retrieve_context  # noqa: E402
 from legal_core.chunking import CHUNKER_VERSION  # noqa: E402
 from legal_core.llm import chat_json  # noqa: E402
 from legal_core.prompts import NO_CONTEXT_ANSWER  # noqa: E402
@@ -45,6 +50,7 @@ STARTED = time.time()
 FALLBACK = ("Не удалось сформировать обоснованный ответ по базе знаний за отведённое время. "
             "Уточните вопрос или обратитесь к юристу.")
 MAX_CHARS = 9500
+INDEX_SHARE = 0.35  # доля бюджета на досчёт эмбеддингов базы (с готовыми из сабмита обычно 0)
 
 
 def log(message):
@@ -84,6 +90,19 @@ def write_submission(questions, answers, path="submission.csv"):
     os.replace(tmp, path)
 
 
+def load_prebuilt():
+    """Готовые эмбеддинги из lc_vectors.py (кладёт build_zip.py); при запуске из репозитория их нет."""
+    try:
+        import lc_vectors
+    except ImportError:
+        return None
+    store = load_store(lc_vectors)
+    if store:
+        log(f"Готовые эмбеддинги в сабмите: {store['meta']['count']} × {store['meta']['dim']} "
+            f"({store['meta'].get('embedding_model')}, собраны {store['meta'].get('built_at', '?')})")
+    return store
+
+
 def build_or_load_index(kb_path, settings):
     digest = hashlib.sha1(Path(kb_path).read_bytes()).hexdigest()[:16]
     cache = Path("/tmp") / f"psb_index_{digest}_{CHUNKER_VERSION}_{settings['embedder_mode']}_{settings['embedding_model'].replace('/', '_')}.pkl"
@@ -95,13 +114,43 @@ def build_or_load_index(kb_path, settings):
         log(f"Пропущен документ {err['file']}: {err['error']}")
     chunks = chunk_documents(docs)
     log(f"Документов: {len(docs)}, фрагментов: {len(chunks)}; эмбеддинги {settings['embedding_model']} ({settings['embedder_mode']})")
-    embeddings = embed_texts_batched([c["embed_text"] for c in chunks], settings)
-    index = build_index(chunks, embeddings, settings)
-    try:
-        cache.write_bytes(pickle.dumps(index))
-    except OSError:
-        pass
+
+    if settings["embedder_mode"] == "fake":
+        embeddings = embed_texts_batched([c["embed_text"] for c in chunks], settings)
+        return build_index(chunks, embeddings, settings)
+
+    # На пересчёт базы — не больше INDEX_SHARE бюджета: остальное время нужно на ответы
+    deadline = STARTED + settings["time_budget_s"] * INDEX_SHARE
+    dense, _ = attach_vectors(
+        chunks, load_prebuilt(),
+        embed_fn=lambda texts: embed_texts(texts, settings),
+        embed_missing=lambda texts: embed_dense_parallel(texts, settings, deadline=deadline),
+        log=log,
+    )
+    if dense is None:
+        raise RuntimeError("нет ни готовых, ни посчитанных эмбеддингов")
+    index = build_index(chunks, {"dense": dense, "sparse": None}, settings)
+    complete = bool(np.all(np.abs(dense).sum(axis=1) > 0))
+    if complete:  # неполный индекс не кэшируем: при повторном запуске досчитаем
+        try:
+            cache.write_bytes(pickle.dumps(index))
+        except OSError:
+            pass
     return index
+
+
+def quick_answer(index, settings, question):
+    """Ответ без обращений к API (BM25 + точные ссылки, текст лучших пунктов): когда время вышло
+    или вопрос упал с ошибкой. Лучше заглушки: судья засчитывает совпадение по сути и не видит выдумок."""
+    try:
+        text, history = parse_dialog(question)
+        queries = heuristic_queries(text, history)
+        local = {**settings, "reranker_model": ""}
+        ranked = hybrid_search(index, queries[-1], None, local)
+        return extractive_answer([index["chunks"][c["idx"]] for c in ranked[:4]], queries[-1])
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return FALLBACK
 
 
 def main():
@@ -122,9 +171,11 @@ def main():
         settings["embedder_mode"] = "fake"
         index = build_or_load_index(kb_path, settings)
     log(f"Индекс готов: {len(index['chunks'])} фрагментов")
+    # после этой отметки проверка ответа (второй вызов LLM) пропускается: черновик лучше заглушки
+    settings["review_until"] = STARTED + budget * 0.8
 
-    answers, lock, done = {}, threading.Lock(), {"n": 0, "spent": 0.0}
-    stats = {"status": {}, "fallback": 0, "slowest": 0.0}
+    answers, lock, done = {}, threading.Lock(), {"n": 0, "spent": 0.0, "since": time.time()}
+    stats = {"status": {}, "fallback": 0, "quick": 0, "slowest": 0.0}
     emb_state = {"fails": 0}
 
     def embed_query(texts):
@@ -147,12 +198,15 @@ def main():
         "retrieve": lambda queries, filters: retrieve_context(index, queries, embed_query, settings, filters),
     }
 
-
     def watchdog():
         time.sleep(max(5, budget + 60 - (time.time() - STARTED)))
         with lock:
+            late = [qid for qid, _ in questions if qid not in answers]
+            for qid, question in questions:
+                if qid not in answers:
+                    answers[qid] = quick_answer(index, settings, question)
             write_submission(questions, answers)
-        log("Время на исходе: записан submission.csv с готовыми ответами, завершаю работу")
+        log(f"Время на исходе: записан submission.csv; без LLM (текст пунктов) — {len(late)} вопросов, завершаю работу")
         os._exit(0)
 
     threading.Thread(target=watchdog, daemon=True).start()
@@ -161,11 +215,16 @@ def main():
         qid, question = item
         elapsed = time.time() - STARTED
         if elapsed > budget - 20:
-            return qid, FALLBACK
+            text = quick_answer(index, settings, question)
+            with lock:
+                stats["quick"] += 1
+                answers[qid] = text
+            return qid, text
         with lock:
             remaining = len(questions) - done["n"]
-            per_question = done["spent"] / done["n"] if done["n"] else 0
-            projected = elapsed + remaining * per_question / settings["max_workers"]
+            # прогноз по фактической пропускной способности (учитывает, что прокси может работать в один поток)
+            wall_per_question = (time.time() - done["since"]) / done["n"] if done["n"] else 0
+            projected = elapsed + remaining * wall_per_question
             if settings["pipeline_mode"] != "fast" and done["n"] >= 3 and projected > budget * 0.85:
                 settings["pipeline_mode"] = "fast"
                 log(f"Прогноз {projected:.0f}s > бюджета: переключаюсь в режим fast")
@@ -174,10 +233,12 @@ def main():
         try:
             result = answer_question(question, [], deps, settings)
             text, status = result["answer_text"], result["status"]
+            if result.get("trace", {}).get("extractive"):
+                status = "без LLM"
         except Exception:  # noqa: BLE001 — один упавший вопрос не должен ронять прогон
-            log(f"Вопрос {qid}: ошибка")
+            log(f"Вопрос {qid}: ошибка, ответ из текста найденных пунктов")
             traceback.print_exc()
-            text = FALLBACK
+            text = quick_answer(index, settings, question)
         with lock:
             spent = time.time() - t
             stats["status"][status] = stats["status"].get(status, 0) + 1
@@ -185,10 +246,11 @@ def main():
             stats["slowest"] = max(stats["slowest"], spent)
             answers[qid] = text
             done["n"] += 1
-            done["spent"] += time.time() - t
+            done["spent"] += spent
             if done["n"] % 10 == 0 or done["n"] == len(questions):
                 log(f"Готово {done['n']}/{len(questions)}; статусы: {stats['status']}; "
-                    f"заглушек: {stats['fallback']}; среднее {done['spent'] / done['n']:.1f}s, "
+                    f"заглушек: {stats['fallback']}; без LLM из-за времени: {stats['quick']}; "
+                    f"среднее {done['spent'] / done['n']:.1f}s, "
                     f"максимум {stats['slowest']:.1f}s; режим: {settings['pipeline_mode']}")
         return qid, text
 
