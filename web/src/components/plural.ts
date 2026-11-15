@@ -5,3 +5,8 @@ export function documentsWord(n: number) {
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'документа'
   return 'документов'
 }
+
+/** «по 21 документу», «по 5 документам» */
+export function documentsDative(n: number) {
+  return n % 10 === 1 && n % 100 !== 11 ? 'документу' : 'документам'
+}
