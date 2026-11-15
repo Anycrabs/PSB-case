@@ -26,6 +26,7 @@ JUDGE_SYSTEM = """Ты — строгий судья ответов юридич
 полнота относительно эталона, поправка ошибочных предпосылок вопроса, честный отказ, если эталон говорит, что
 ответа в базе нет. Длина и стиль вторичны. Факт, которого нет в эталоне и который противоречит ему или выглядит
 выдуманным (несуществующий пункт, сумма, документ), — тяжёлая ошибка.
+Вердикт всегда описывает ответ B по сравнению с ответом A. Если лучше ответ A — пиши B_worse или B_much_worse.
 Верни только JSON:
 {"verdict": "B_much_better | B_better | equal | B_worse | B_much_worse",
  "a_fabricated": true или false — есть ли в ответе A выдуманный или противоречащий эталону факт,
@@ -33,13 +34,52 @@ JUDGE_SYSTEM = """Ты — строгий судья ответов юридич
  "reason": "одно короткое предложение"}"""
 
 SCALE = {"B_much_better": 1.0, "B_better": 0.75, "equal": 0.5, "B_worse": 0.25, "B_much_worse": 0.0}
+# Модели часто отвечают с точки зрения A («A_much_better»), когда A заметно лучше, или по-русски.
+# Без этой нормализации такие вопросы выпадали из оценки как «судья не ответил по схеме» — а это ровно
+# те вопросы, где наш ответ (A во втором раунде) намного лучше baseline, и итог занижался.
+MIRROR = {"much_better": "much_worse", "better": "worse", "worse": "better", "much_worse": "much_better"}
+
+
+def normalize_verdict(raw):
+    """'A_much_better' -> 'B_much_worse', 'B much better' -> 'B_much_better', 'равны' -> 'equal'; иначе None."""
+    text = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if "|" in text:  # модель повторила шаблон схемы вместо выбора
+        return None
+    if text in {"equal", "tie", "same", "равны", "одинаково", "сопоставимо", "сопоставимы"}:
+        return "equal"
+    for name in SCALE:
+        if text == name.lower():
+            return name
+    side = "a" if text.startswith(("a_", "a(", "ответ_a", "а_")) else "b" if text.startswith(("b_", "ответ_b")) else None
+    much = any(w in text for w in ("much", "значительно", "намного", "существенно", "гораздо"))
+    if any(w in text for w in ("better", "лучше")):
+        degree = "much_better" if much else "better"
+    elif any(w in text for w in ("worse", "хуже")):
+        degree = "much_worse" if much else "worse"
+    elif "equal" in text or "равн" in text:
+        return "equal"
+    else:
+        return None
+    if side is None:
+        return None
+    return "B_" + (MIRROR[degree] if side == "a" else degree)
 
 
 def judge_round(question, golden, answer_a, answer_b, settings):
     user = (f"<question>\n{question}\n</question>\n<golden>\n{golden}\n</golden>\n"
             f"<answer_A>\n{answer_a}\n</answer_A>\n<answer_B>\n{answer_b}\n</answer_B>")
-    result = chat_json([{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": user}],
-                       settings, max_tokens=600, default={}) or {}
+    messages = [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": user}]
+    result = chat_json(messages, settings, max_tokens=600, default={}) or {}
+    verdict = normalize_verdict(result.get("verdict"))
+    if verdict is None:  # одна повторная попытка с напоминанием схемы
+        retry = messages + [{"role": "assistant", "content": str(result)[:500]},
+                            {"role": "user", "content": "Поле verdict должно быть ровно одним из: B_much_better, "
+                                                        "B_better, equal, B_worse, B_much_worse (оценка ответа B "
+                                                        "относительно A). Верни JSON заново."}]
+        result = chat_json(retry, settings, max_tokens=600, default={}) or {}
+        verdict = normalize_verdict(result.get("verdict"))
+    result["raw_verdict"] = result.get("verdict")
+    result["verdict"] = verdict
     return result
 
 
@@ -48,7 +88,7 @@ def judge_pair(question, golden, ours, baseline, settings):
     r1 = judge_round(question, golden, baseline, ours, settings)   # B = наш
     r2 = judge_round(question, golden, ours, baseline, settings)   # B = baseline
     if r1.get("verdict") not in SCALE or r2.get("verdict") not in SCALE:
-        return None, "судья не ответил по схеме"
+        return None, f"судья не ответил по схеме: {r1.get('raw_verdict')!r} / {r2.get('raw_verdict')!r}"
     # выдуманный факт в нашем ответе (B в раунде 1, A в раунде 2) обнуляет весь вопрос
     if r1.get("b_fabricated") is True or r2.get("a_fabricated") is True:
         return 0.0, f"выдуманный факт в нашем ответе: {r1.get('reason', '')} / {r2.get('reason', '')}"

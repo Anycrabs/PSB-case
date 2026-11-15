@@ -11,7 +11,12 @@ import time
 import httpx
 
 RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
-STATE = {"json_mode": True}  # выключается навсегда, если сервер не понимает response_format
+STATE = {"json_mode": True, "max_tokens_cap": None}  # выключается навсегда, если сервер не понимает response_format
+
+
+def _limit(max_tokens, settings):
+    """max_tokens не больше MAX_TOKENS платформы и не больше лимита, на который уже ругался прокси."""
+    return min(v for v in (max_tokens, settings.get("llm_max_tokens"), STATE.get("max_tokens_cap")) if v)
 
 
 def chat(messages, settings, json_mode=False, max_tokens=2000, temperature=None):
@@ -24,7 +29,7 @@ def chat(messages, settings, json_mode=False, max_tokens=2000, temperature=None)
         "model": settings["llm_model"],
         "messages": messages,
         "temperature": settings["llm_temperature"] if temperature is None else temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": _limit(max_tokens, settings),
     }
     use_json = json_mode and settings["llm_json_mode"] and STATE["json_mode"]
     if use_json:
@@ -34,6 +39,12 @@ def chat(messages, settings, json_mode=False, max_tokens=2000, temperature=None)
     for attempt in range(4):
         try:
             response = httpx.post(url, json=body, headers=headers, timeout=settings["llm_timeout"])
+            if response.status_code in (400, 413, 422) and body["max_tokens"] > 1024:
+                # Частая причина 400 — max_tokens больше лимита прокси: повторяем с 1024 и запоминаем для всех вызовов
+                print(f"LLM: HTTP {response.status_code} при max_tokens={body['max_tokens']}, повторяю с 1024: "
+                      f"{response.text[:200]}", flush=True)
+                body["max_tokens"] = STATE["max_tokens_cap"] = 1024
+                continue
             if response.status_code == 400 and use_json:
                 # Сервер не понял response_format — повторяем без него, JSON разберём сами
                 body.pop("response_format", None)

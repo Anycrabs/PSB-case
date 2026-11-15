@@ -33,6 +33,7 @@
 import argparse
 import csv
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -183,6 +184,75 @@ def proxy_stats(reset=False):
         return {}
 
 
+def judge_and_report(items, team, baseline, run_dir, judge_workers, set_name, team_seconds, team_code, team_usage,
+                     team_errors):
+    ids = [qid for qid, _, _ in items]
+    os.environ.update({"LLM_BASE_URL": PROXY_HOST, "LLM_API_KEY": "local-platform"})
+    from legal_core.config import get_settings
+
+    from judge import judge_pair, summarize
+
+    settings = get_settings()
+    log(f"Судья: {len(items)} вопросов × 2 раунда")
+
+    def judge(item):
+        qid, question, golden = item
+        ours, base = team.get(qid, ""), baseline.get(qid, "")
+        if not ours:
+            return qid, 0.0, "нет ответа команды (ошибка или тайм-аут)"
+        try:
+            return (qid, *judge_pair(question, golden, ours, base, settings))
+        except Exception as exc:  # noqa: BLE001 — техническая ошибка судьи: вопрос исключается, как на платформе
+            return qid, None, f"ошибка судьи: {type(exc).__name__}"
+
+    with ThreadPoolExecutor(max_workers=judge_workers) as pool:
+        verdicts = {qid: (score, reason) for qid, score, reason in pool.map(judge, items)}
+
+    rows = []
+    for qid, question, golden in items:
+        score, reason = verdicts[qid]
+        rows.append({"id": qid, "score": "" if score is None else f"{score:.2f}", "question": question,
+                     "golden": golden, "ours": team.get(qid, ""), "baseline": baseline.get(qid, ""), "reason": reason})
+    rows.sort(key=lambda r: float(r["score"]) if r["score"] else 9)   # худшие сверху: с них и начинать разбор
+    write_csv(run_dir / "report.csv", rows, ["id", "score", "question", "golden", "ours", "baseline", "reason"])
+
+    total = summarize([verdicts[q][0] for q in ids])
+    fabricated = sum(1 for s, r in verdicts.values() if s == 0 and str(r).startswith("выдуманный факт"))
+    ties = total["n"] - total.get("wins", 0) - total.get("losses", 0)
+    lines = [
+        f"Набор: {set_name}, вопросов {len(items)}, оценено судьёй {total['n']}",
+        f"Score x100 = {total['score'] * 100:.1f}   (0.7 × MatchRate {total['match_rate']:.3f} + 0.3 × WinRate {total['win_rate']:.3f})",
+        f"Побед {total.get('wins', 0)}, ничьих {ties}, поражений {total.get('losses', 0)}; выдуманных фактов: {fabricated}",
+        f"Время решения: {team_seconds:.0f} с из {TIMEOUT_S} (код выхода {team_code})",
+        f"Вызовов LLM решением: {team_usage.get('chat', '?')}, токенов: "
+        f"{team_usage.get('prompt_tokens', 0)} + {team_usage.get('completion_tokens', 0)}",
+        "Формат submission.csv: " + ("ок" if not team_errors else "; ".join(team_errors)),
+        f"Подробно (худшие вопросы сверху): {(run_dir / 'report.csv').relative_to(ROOT)}",
+    ]
+    if total["n"] < len(items):
+        lines.insert(1, f"ВНИМАНИЕ: судья не оценил {len(items) - total['n']} вопросов — итог по неполному набору")
+    (run_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (run_dir / "summary.json").write_text(json.dumps({**total, "fabricated": fabricated, "seconds": team_seconds},
+                                                     ensure_ascii=False, indent=2), encoding="utf-8")
+    print("\n" + "\n".join(lines))
+
+
+def rejudge(run_dir, judge_workers):
+    """Повторная оценка готового прогона: вопросы, эталон и оба ответа берутся из его report.csv."""
+    run_dir = run_dir.resolve()
+    with open(run_dir / "report.csv", encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    rows.sort(key=lambda r: (r["id"][:1], int(re.sub(r"\D", "", r["id"]) or 0)))
+    items = [(r["id"], r["question"], r["golden"]) for r in rows]
+    team = {r["id"]: r["ours"] for r in rows}
+    baseline = {r["id"]: r["baseline"] for r in rows}
+    old = {}
+    if (run_dir / "summary.json").exists():
+        old = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    log(f"Переоценка {run_dir.name}: {len(items)} вопросов, решения не перезапускаются")
+    judge_and_report(items, team, baseline, run_dir, judge_workers, "переоценка", old.get("seconds", 0), 0, {}, [])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--set", choices=["demo", "bench", "all"], default="all")
@@ -193,6 +263,8 @@ def main():
     parser.add_argument("--workers", type=int, default=None,
                         help="MAX_WORKERS для решения; по умолчанию 4, а при прокси в один поток — 1")
     parser.add_argument("--no-docker", action="store_true", help="запускать решения без контейнера")
+    parser.add_argument("--rejudge", metavar="RUN_DIR",
+                        help="только переоценить готовый прогон (eval_runs/<время>) судьёй, решения не запускать")
     args = parser.parse_args()
 
     import httpx
@@ -210,6 +282,9 @@ def main():
     log(f"LLM: {health.get('upstream')} ({health.get('model')}); параллельно: решение {workers}, судья {judge_workers}")
     if single:
         log("Прокси работает в один поток (GigaChat Freemium): прогон будет медленнее; начните с --set demo")
+
+    if args.rejudge:
+        return rejudge(Path(args.rejudge), judge_workers)
 
     items = question_set(args.set)
     ids = [qid for qid, _, _ in items]
@@ -250,52 +325,9 @@ def main():
     # 3. судья
     if team_errors:
         log("Сабмит не прошёл бы проверку формата: " + "; ".join(team_errors))
-    os.environ.update({"LLM_BASE_URL": PROXY_HOST, "LLM_API_KEY": "local-platform"})
-    from legal_core.config import get_settings
+    judge_and_report(items, team, baseline, run_dir, judge_workers, args.set, team_seconds, team_code, team_usage,
+                     team_errors)
 
-    from judge import judge_pair, summarize
-
-    settings = get_settings()
-    log(f"Судья: {len(items)} вопросов × 2 раунда")
-
-    def judge(item):
-        qid, question, golden = item
-        ours, base = team.get(qid, ""), baseline.get(qid, "")
-        if not ours:
-            return qid, 0.0, "нет ответа команды (ошибка или тайм-аут)"
-        try:
-            return (qid, *judge_pair(question, golden, ours, base, settings))
-        except Exception as exc:  # noqa: BLE001 — техническая ошибка судьи: вопрос исключается, как на платформе
-            return qid, None, f"ошибка судьи: {type(exc).__name__}"
-
-    with ThreadPoolExecutor(max_workers=judge_workers) as pool:
-        verdicts = {qid: (score, reason) for qid, score, reason in pool.map(judge, items)}
-
-    rows = []
-    for qid, question, golden in items:
-        score, reason = verdicts[qid]
-        rows.append({"id": qid, "score": "" if score is None else f"{score:.2f}", "question": question,
-                     "golden": golden, "ours": team.get(qid, ""), "baseline": baseline.get(qid, ""), "reason": reason})
-    rows.sort(key=lambda r: float(r["score"]) if r["score"] else 9)   # худшие сверху: с них и начинать разбор
-    write_csv(run_dir / "report.csv", rows, ["id", "score", "question", "golden", "ours", "baseline", "reason"])
-
-    total = summarize([verdicts[q][0] for q in ids])
-    fabricated = sum(1 for s, r in verdicts.values() if s == 0 and str(r).startswith("выдуманный факт"))
-    ties = total["n"] - total.get("wins", 0) - total.get("losses", 0)
-    lines = [
-        f"Набор: {args.set}, вопросов {len(items)}, оценено судьёй {total['n']}",
-        f"Score x100 = {total['score'] * 100:.1f}   (0.7 × MatchRate {total['match_rate']:.3f} + 0.3 × WinRate {total['win_rate']:.3f})",
-        f"Побед {total.get('wins', 0)}, ничьих {ties}, поражений {total.get('losses', 0)}; выдуманных фактов: {fabricated}",
-        f"Время решения: {team_seconds:.0f} с из {TIMEOUT_S} (код выхода {team_code})",
-        f"Вызовов LLM решением: {team_usage.get('chat', '?')}, токенов: "
-        f"{team_usage.get('prompt_tokens', 0)} + {team_usage.get('completion_tokens', 0)}",
-        "Формат submission.csv: " + ("ок" if not team_errors else "; ".join(team_errors)),
-        f"Подробно (худшие вопросы сверху): {(run_dir / 'report.csv').relative_to(ROOT)}",
-    ]
-    (run_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (run_dir / "summary.json").write_text(json.dumps({**total, "fabricated": fabricated, "seconds": team_seconds},
-                                                     ensure_ascii=False, indent=2), encoding="utf-8")
-    print("\n" + "\n".join(lines))
 
 
 if __name__ == "__main__":

@@ -105,3 +105,23 @@ def test_extractive_answer_picks_matching_line():
     text = extractive_answer([chunk], "Какая арендная плата по договору с ООО «Северный Склад»?")
     assert "450 000" in text and "620" not in text
     assert extractive_answer([chunk], "Какой размер пособия по беременности и родам?") == NO_CONTEXT_ANSWER
+
+
+def test_lean_single_call_plain_text(settings, index):
+    from legal_core.pipeline import answer_question_lean
+    from legal_core.runtime import make_local_deps
+
+    calls = []
+
+    def llm_text(messages):
+        calls.append(messages)
+        return "**Ответ:** Да, вас должны пропускать круглосуточно [S1].\nИсточник: договор аренды, п. 4.3."
+
+    deps = {**make_local_deps(settings, index), "llm_text": llm_text}
+    result = answer_question_lean("По договору с «Северным Складом» нас должны пропускать ночью?", [], deps, settings)
+    assert len(calls) == 1 and result["status"] == "answer"
+    assert result["answer_text"].startswith("Да, вас должны") and "[S1]" not in result["answer_text"]
+    assert "**" not in result["answer_text"] and "\n" not in result["answer_text"]
+    down = {**deps, "llm_text": lambda m: (_ for _ in ()).throw(RuntimeError("down"))}
+    fallback = answer_question_lean("Какая арендная плата по договору с «Северным Складом»?", [], down, settings)
+    assert fallback["trace"]["extractive"] and fallback["answer_text"]

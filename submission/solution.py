@@ -39,17 +39,19 @@ from legal_core.config import get_settings  # noqa: E402
 from legal_core.embeddings import embed_dense_parallel, embed_texts, embed_texts_batched  # noqa: E402
 from legal_core.index import build_index  # noqa: E402
 from legal_core.parsing import read_knowledge_base  # noqa: E402
-from legal_core.pipeline import answer_question, extractive_answer, heuristic_queries, parse_dialog  # noqa: E402
+from legal_core.pipeline import (answer_question, answer_question_lean, extractive_answer,  # noqa: E402
+                                 heuristic_queries, parse_dialog)
 from legal_core.prebuilt import attach_vectors, load_store  # noqa: E402
 from legal_core.retrieval import hybrid_search, retrieve_context  # noqa: E402
 from legal_core.chunking import CHUNKER_VERSION  # noqa: E402
-from legal_core.llm import chat_json  # noqa: E402
+from legal_core.llm import chat, chat_json  # noqa: E402
 from legal_core.prompts import NO_CONTEXT_ANSWER  # noqa: E402
 
 STARTED = time.time()
 FALLBACK = ("Не удалось сформировать обоснованный ответ по базе знаний за отведённое время. "
             "Уточните вопрос или обратитесь к юристу.")
 MAX_CHARS = 9500
+ANSWER = {True: answer_question_lean, False: answer_question}
 INDEX_SHARE = 0.35  # доля бюджета на досчёт эмбеддингов базы (с готовыми из сабмита обычно 0)
 
 
@@ -154,8 +156,15 @@ def quick_answer(index, settings, question):
 
 
 def main():
+    # Платформа показывает в логах stderr (README примера организаторов: «Смотрите stderr в логах платформы»),
+    # а print() пишет в stdout. Весь вывод решения, включая зонд и ошибки модулей lc_*, отправляем в stderr.
+    sys.stdout = sys.stderr
     settings = get_settings()
     settings["max_workers"] = max(1, min(16, settings["max_workers"]))
+    # SOLUTION_MODE=lean (по умолчанию): один вызов LLM простым текстом; =pipeline — конвейер прототипа (JSON + проверка)
+    settings["solution_mode"] = os.environ.get("SOLUTION_MODE", "lean").strip().lower()
+    if settings["solution_mode"] == "lean":
+        settings["pipeline_mode"] = "lean"
     budget = settings["time_budget_s"]
     data_dir = settings["data_dir"]
 
@@ -195,6 +204,7 @@ def main():
 
     deps = {
         "llm_json": lambda messages, max_tokens, default: chat_json(messages, settings, max_tokens, default),
+        "llm_text": lambda messages: chat(messages, settings, max_tokens=settings.get("llm_max_tokens", 3000)),
         "retrieve": lambda queries, filters: retrieve_context(index, queries, embed_query, settings, filters),
     }
 
@@ -225,13 +235,13 @@ def main():
             # прогноз по фактической пропускной способности (учитывает, что прокси может работать в один поток)
             wall_per_question = (time.time() - done["since"]) / done["n"] if done["n"] else 0
             projected = elapsed + remaining * wall_per_question
-            if settings["pipeline_mode"] != "fast" and done["n"] >= 3 and projected > budget * 0.85:
+            if settings["pipeline_mode"] not in ("fast", "lean") and done["n"] >= 3 and projected > budget * 0.85:
                 settings["pipeline_mode"] = "fast"
                 log(f"Прогноз {projected:.0f}s > бюджета: переключаюсь в режим fast")
         t = time.time()
         status = "error"
         try:
-            result = answer_question(question, [], deps, settings)
+            result = ANSWER[settings["solution_mode"] == "lean"](question, [], deps, settings)
             text, status = result["answer_text"], result["status"]
             if result.get("trace", {}).get("extractive"):
                 status = "без LLM"
@@ -291,7 +301,7 @@ def run_probe(deps, settings, budget, kb_path):
         if time.time() > deadline:
             return group, pid, None, f"PROBE {group}:{pid} пропущен — время"
         try:
-            result = answer_question(question, [], deps, settings)
+            result = ANSWER[settings["solution_mode"] == "lean"](question, [], deps, settings)
         except Exception as exc:  # noqa: BLE001
             return group, pid, None, f"PROBE {group}:{pid} [error] {type(exc).__name__}: {exc}"
         ours = " ".join(result["answer_text"].split())
