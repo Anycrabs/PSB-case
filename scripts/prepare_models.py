@@ -35,8 +35,10 @@ def main():
     for attempt in range(1, 4):
         try:
             started = time.time()
-            print(f"Загрузка {model} в {cache} (попытка {attempt}); первый раз ~2.3 ГБ, дальше — из кэша", flush=True)
-            path = snapshot_download(model, ignore_patterns=["*.onnx", "onnx/*", "*.msgpack", "*.h5", "imgs/*"])
+            print(f"Загрузка {model} в {cache} (попытка {attempt}); первый раз ~4.5 ГБ, дальше — из кэша", flush=True)
+            # те же исключения, что у FlagEmbedding: иначе в офлайн-режиме он считает снимок неполным
+            # (IncompleteSnapshotError при запуске indexer/embedder)
+            path = snapshot_download(model, ignore_patterns=["flax_model.msgpack", "rust_model.ot", "tf_model.h5"])
             print(f"Модель готова: {path} ({time.time() - started:.0f} с)")
             return 0
         except Exception as exc:  # noqa: BLE001 — сеть до huggingface.co бывает нестабильной

@@ -40,6 +40,10 @@ cd web && npm ci && npm run dev            # http://localhost:5173, /api про�
 
 ## Сабмит на платформу
 
+> **Лучший результат на платформе — 33.125, сабмит `submission_v3/`** (готовый архив: `submissions/submission_v3.zip`).
+> Это самодостаточная папка, она не собирается из `legal_core`; что в ней изменено — в `submission_v3/README.md`,
+> история всех сабмитов и выводы — в `PROJECT.md`, раздел 6. Сборка из ядра, описанная ниже, давала меньше.
+
 ```bash
 docker compose --profile eval up -d             # нужен platform-proxy с bge-m3: из него берутся готовые эмбеддинги
 python submission/build_zip.py                  # -> dist/submission.zip (в нём lc_vectors.py)
@@ -99,6 +103,9 @@ services/        gateway, orchestrator, retrieval, embedder (FastAPI)
 web/             интерфейс: React + TypeScript + Vite; Dockerfile (сборка + nginx), nginx.conf.template
   src/components  стартовый экран, ответ и источники, шторка документа, история и реестр
 submission/      solution.py, build_zip.py, requirements.txt
+submission_v3/   лучший сабмит (33.125): самодостаточная папка, solution.py и lc_*.py; README с изменениями
+submission_v2/   основа v3 (на платформу не отправлялся)
+submissions/     готовые ZIP: submission_v3.zip, submission_8.zip, submission_v2.zip
 scripts/         build_index.py, ask.py
 eval/            demo_eval.py, compare_demo.py
 data/            knowledge-base.zip и demo/ — материалы организаторов

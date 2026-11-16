@@ -8,14 +8,14 @@ import { documentsDative } from './plural'
 const EXAMPLES: { kind: 'c' | 'r' | 'l'; icon: IconName; label: string; source: string; question: string }[] = [
   {
     kind: 'c',
-    icon: 'briefcase',
+    icon: 'case',
     label: 'Арендная плата по договору с ООО «Северный Склад» и срок её внесения',
     source: 'Договор А-08/2024',
     question: 'Какая арендная плата по договору с ООО «Северный Склад» и до какого числа её вносить?',
   },
   {
     kind: 'r',
-    icon: 'book',
+    icon: 'bookPlain',
     label: 'Нужно ли одобрение гендиректора для договора на 12 млн в августе 2024?',
     source: 'Регламент, ред. 2023',
     question: 'Договор на 12 млн рублей заключали в августе 2024 года. Нужно ли было одобрение генерального директора?',
@@ -29,7 +29,7 @@ const EXAMPLES: { kind: 'c' | 'r' | 'l'; icon: IconName; label: string; source: 
   },
   {
     kind: 'r',
-    icon: 'doc',
+    icon: 'page',
     label: 'Санкционная проверка договора с иностранной компанией',
     source: 'Письмо К-12',
     question: 'Нужна ли санкционная проверка для договора с иностранной компанией?',
@@ -46,8 +46,8 @@ const isTyping = (el: EventTarget | null) =>
   el instanceof HTMLElement && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
 
 export function StartScreen({ docs, busy, onAsk }: Props) {
-  // -1 — ничего не выбрано: Enter в пустом поле ничего не отправит, пока пример не выбран стрелкой
-  const [sel, setSel] = useState(-1)
+  // выбран первый пример: Enter в пустом поле и кнопка «Спросить» задают его; Esc снимает выбор (-1)
+  const [sel, setSel] = useState(0)
 
   // цифры 1–4 работают, когда курсор не в поле ввода (иначе мешали бы набирать «152-ФЗ…»)
   useEffect(() => {
@@ -70,8 +70,6 @@ export function StartScreen({ docs, busy, onAsk }: Props) {
       e.preventDefault()
       const step = e.key === 'ArrowDown' ? 1 : -1
       setSel((i) => (i + step + EXAMPLES.length) % EXAMPLES.length)
-    } else if (e.key === 'Enter' && !e.shiftKey && sel >= 0 && !busy) {
-      onAsk(EXAMPLES[sel].question)
     } else if (e.key === 'Escape') {
       setSel(-1)
     }
@@ -89,7 +87,14 @@ export function StartScreen({ docs, busy, onAsk }: Props) {
           <span className="palette-icon">
             <Icon name="search" size={19} />
           </span>
-          <Composer busy={busy} placeholder="Например: срок оплаты по договору П-17/2024" onSend={onAsk} autoFocus />
+          <Composer
+            busy={busy}
+            placeholder="Например: срок оплаты по договору П-17/2024"
+            onSend={onAsk}
+            onEmptySubmit={sel >= 0 ? () => onAsk(EXAMPLES[sel].question) : null}
+            showKey
+            autoFocus
+          />
         </div>
 
         <div className="palette-sec">
@@ -127,7 +132,7 @@ export function StartScreen({ docs, busy, onAsk }: Props) {
             <kbd>⏎</kbd> спросить
           </span>
           <span className="palette-base">
-            <Icon name="book" size={15} />
+            <Icon name="bookPlain" size={15} />
             {docs === null
               ? 'Подключаюсь к базе…'
               : docs.length

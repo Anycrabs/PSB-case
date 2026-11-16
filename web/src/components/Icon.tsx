@@ -25,6 +25,9 @@ const PATHS = {
   chevronRight: 'M9 6l6 6-6 6',
   target: 'M12 21a9 9 0 100-18 9 9 0 000 18zM12 16a4 4 0 100-8 4 4 0 000 8zM12 12h.01',
   briefcase: 'M4 8h16v11H4zM9 8V5h6v3M4 13h16',
+  case: 'M4 8h16v11H4zM9 8V5h6v3',
+  bookPlain: 'M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2zM4 5v16',
+  page: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5',
   coins: 'M12 7c4 0 7-1.3 7-3s-3-3-7-3-7 1.3-7 3 3 3 7 3zM5 4v6c0 1.7 3 3 7 3s7-1.3 7-3V4M5 10v6c0 1.7 3 3 7 3s7-1.3 7-3v-6',
   users: 'M9 11a4 4 0 100-8 4 4 0 000 8zM2 21v-1a6 6 0 0112 0v1M16 3.1a4 4 0 010 7.8M22 21v-1a6 6 0 00-4-5.7',
 } as const

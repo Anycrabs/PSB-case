@@ -3,7 +3,6 @@ import { listDialogs } from '../api/client'
 import type { DialogSummary, DocumentSummary } from '../api/types'
 import { Icon } from './Icon'
 import { DOC_TYPE_ORDER, docType } from './docTypes'
-import { documentsWord } from './plural'
 
 const RECENT_LIMIT = 5
 
@@ -152,7 +151,7 @@ export function Sidebar(props: Props) {
           {docs === null
             ? 'Подключаюсь к базе…'
             : docs.length
-              ? `База актуальна: ${docs.length} ${documentsWord(docs.length)}`
+              ? 'База актуальна, индекс собран'
               : 'База документов недоступна'}
         </div>
       </aside>

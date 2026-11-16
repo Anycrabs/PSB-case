@@ -5,9 +5,13 @@ interface Props {
   placeholder: string
   onSend: (text: string) => void
   autoFocus?: boolean
+  /** что делать по Enter и по кнопке, пока поле пустое (на начальном экране — спросить выбранный пример) */
+  onEmptySubmit?: (() => void) | null
+  /** показать на кнопке клавишу ⏎ */
+  showKey?: boolean
 }
 
-export function Composer({ busy, placeholder, onSend, autoFocus }: Props) {
+export function Composer({ busy, placeholder, onSend, autoFocus, onEmptySubmit, showKey }: Props) {
   const [text, setText] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -18,8 +22,14 @@ export function Composer({ busy, placeholder, onSend, autoFocus }: Props) {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }, [text])
 
+  const canSend = !busy && (text.trim() !== '' || Boolean(onEmptySubmit))
+
   const submit = () => {
-    if (!text.trim() || busy) return
+    if (busy) return
+    if (!text.trim()) {
+      onEmptySubmit?.()
+      return
+    }
     onSend(text)
     setText('')
   }
@@ -43,8 +53,9 @@ export function Composer({ busy, placeholder, onSend, autoFocus }: Props) {
         onKeyDown={onKeyDown}
         autoFocus={autoFocus}
       />
-      <button className="ask-btn" onClick={submit} disabled={!text.trim() || busy} title={busy ? 'Дождитесь ответа' : undefined}>
+      <button className="ask-btn" onClick={submit} disabled={!canSend} title={busy ? 'Дождитесь ответа' : undefined}>
         Спросить
+        {showKey && <kbd aria-hidden="true">⏎</kbd>}
       </button>
     </div>
   )
